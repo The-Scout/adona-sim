@@ -1002,41 +1002,59 @@ fn formations_march_on_contested_ground_and_fight_on_arrival() {
             w.define_toe_template("Ad Hoc", "line", vec![ToeSlot { role: "Line".into(), design, count: n }]);
         w.try_assemble_formation(owner, template, "Ad Hoc Force", at).unwrap()
     };
-    let karth_formation = make_formation(&mut w, karth, home, 5);
+    // Two formations at home: home is a frontline site (route to Veyra-held
+    // ground), so the deployment AI keeps one as garrison and only marches
+    // the surplus — a lone defender is never expected to abandon the line.
+    let garrison_formation = make_formation(&mut w, karth, home, 5);
+    let attack_formation = make_formation(&mut w, karth, home, 5);
     // A lone outmatched defender already sitting on the frontier: enough to
     // prove the battle really happened, not enough to win it.
     make_formation(&mut w, veyra, frontier, 1);
 
-    // Tick 1: Karth's formation, stationed on its own controlled ground with
-    // a route to Veyra-held ground, marches automatically — no manual order
-    // given.
+    // Tick 1: one of Karth's two formations at its own controlled ground
+    // with a route to Veyra-held ground marches automatically — no manual
+    // order given — while the other stays behind to hold the line.
     w.tick();
-    match w.formation(karth_formation).unwrap().state {
+    let marched_formation = if w.formation(garrison_formation).unwrap().current_site().is_none() {
+        garrison_formation
+    } else {
+        attack_formation
+    };
+    let held_formation = if marched_formation == garrison_formation { attack_formation } else { garrison_formation };
+
+    match w.formation(marched_formation).unwrap().state {
         FormationState::EnRoute { route: r, .. } => assert_eq!(r, route),
         other => panic!("formation on controlled ground with a hostile-held neighbor did not march: {other:?}"),
     }
-    assert!(w.formation(karth_formation).unwrap().current_site().is_none(), "en route formation is on no site");
-    let marched = w
-        .events()
-        .iter()
-        .any(|e| matches!(&e.kind, EventKind::FormationMarchOrdered { formation, .. } if *formation == karth_formation));
+    assert!(w.formation(marched_formation).unwrap().current_site().is_none(), "en route formation is on no site");
+    assert_eq!(
+        w.formation(held_formation).unwrap().current_site(),
+        Some(home),
+        "a frontline site must keep at least one garrison formation"
+    );
+    let marched = w.events().iter().any(
+        |e| matches!(&e.kind, EventKind::FormationMarchOrdered { formation, .. } if *formation == marched_formation),
+    );
     assert!(marched, "no FormationMarchOrdered event was recorded");
     assert!(w.check_invariants().is_empty());
 
     // Tick 2: still en route (2-day route), cannot fight, cannot be ordered
     // to march again.
     w.tick();
-    assert!(matches!(w.formation(karth_formation).unwrap().state, FormationState::EnRoute { .. }));
-    assert_eq!(w.order_formation_march(karth_formation, route), Err(SimError::FormationNotAtSite(karth_formation)));
+    assert!(matches!(w.formation(marched_formation).unwrap().state, FormationState::EnRoute { .. }));
+    assert_eq!(
+        w.order_formation_march(marched_formation, route),
+        Err(SimError::FormationNotAtSite(marched_formation))
+    );
 
     // Tick 3: arrives at the frontier and, sharing hostile ground with
     // Veyra's formation, fights automatically the same tick it lands.
     let before = w.events().len();
     w.tick();
-    assert_eq!(w.formation(karth_formation).unwrap().current_site(), Some(frontier));
+    assert_eq!(w.formation(marched_formation).unwrap().current_site(), Some(frontier));
     let arrived = w.events()[before..]
         .iter()
-        .any(|e| matches!(&e.kind, EventKind::FormationArrived { formation, at } if *formation == karth_formation && *at == frontier));
+        .any(|e| matches!(&e.kind, EventKind::FormationArrived { formation, at } if *formation == marched_formation && *at == frontier));
     assert!(arrived, "no FormationArrived event was recorded");
     let fought = w.events()[before..].iter().any(|e| matches!(&e.kind, EventKind::BattleResolved { .. }));
     assert!(fought, "formation did not fight immediately on arrival at hostile ground");
@@ -1726,4 +1744,173 @@ fn mine_reserves_deplete_for_real() {
         Err(SimError::InsufficientQuantity { missing, .. }) => assert_eq!(missing, 600),
         other => panic!("mined ore that is not in the ground: {other:?}"),
     }
+}
+
+/// Three factions sharing one site should all actually fight in the same
+/// tick — the cascading multi-faction battle, not just the first two owners
+/// while a third sits untouched next to a live enemy.
+#[test]
+fn three_way_standoff_cascades_through_all_factions_in_one_tick() {
+    use adona_sim::events::EventKind;
+
+    let mut w = World::new(7);
+    let karth = w.create_actor("Karth Directorate", ActorKind::Faction, 0);
+    let veyra = w.create_actor("Veyra Compact", ActorKind::Faction, 0);
+    let orsk = w.create_actor("Orsk Combine", ActorKind::Faction, 0);
+    let site = w.create_location("Tri-Point", LocationKind::Battlefield, (0, 0));
+    w.set_territory_controller(site, Some(karth)).unwrap();
+
+    let mech_slots: Vec<_> = (0..5)
+        .map(|i| {
+            let def = w.define_component_def(&format!("Part {i}"), 1, ComponentCategory::MechOrEquipment);
+            ComponentSlot { name: format!("Slot {i}"), accepts: vec![def] }
+        })
+        .collect();
+    let design = w.define_design("Grunt", AssetKind::Mech, mech_slots, None, None).unwrap();
+
+    let make_formation = |w: &mut World, owner: ActorId, n: u32| -> FormationId {
+        let mut assets = Vec::new();
+        for _ in 0..n {
+            assets.push(
+                w.seed_asset(
+                    owner,
+                    design,
+                    site,
+                    QualityGrade::Standard,
+                    AssetOrigin::SeededHistorical { note: "line mech".into() },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        let template =
+            w.define_toe_template("Ad Hoc", "line", vec![ToeSlot { role: "Line".into(), design, count: n }]);
+        w.try_assemble_formation(owner, template, "Ad Hoc Force", site).unwrap()
+    };
+    make_formation(&mut w, karth, 5);
+    make_formation(&mut w, veyra, 5);
+    make_formation(&mut w, orsk, 5);
+
+    let before = w.events().len();
+    w.tick();
+    let battles = w.events()[before..]
+        .iter()
+        .filter(|e| matches!(&e.kind, EventKind::BattleResolved { .. }))
+        .count();
+    assert_eq!(battles, 2, "a three-way standoff must cascade through two pairwise battles in one tick");
+    assert!(w.check_invariants().is_empty());
+}
+
+/// A defender that has held ground for weeks should be measurably harder to
+/// dislodge than a defender who just captured the same ground moments ago —
+/// the entrenchment bonus that backs "hold the frontline."
+#[test]
+fn entrenched_defenders_resist_attacks_that_would_beat_a_fresh_capture() {
+    let make_world = |days_held: u64| {
+        let mut w = World::new(99);
+        let attacker = w.create_actor("Attackers", ActorKind::Faction, 0);
+        let defender = w.create_actor("Defenders", ActorKind::Faction, 0);
+        let site = w.create_location("Ridge Line", LocationKind::Battlefield, (0, 0));
+
+        let mech_slots: Vec<_> = (0..5)
+            .map(|i| {
+                let def = w.define_component_def(&format!("Part {i}"), 1, ComponentCategory::MechOrEquipment);
+                ComponentSlot { name: format!("Slot {i}"), accepts: vec![def] }
+            })
+            .collect();
+        let design = w.define_design("Grunt", AssetKind::Mech, mech_slots, None, None).unwrap();
+
+        for _ in 0..days_held {
+            w.tick();
+        }
+        w.set_territory_controller(site, Some(defender)).unwrap();
+        // set_territory_controller stamps controlled_since at the day it is
+        // called, so roll the clock forward again to actually simulate time
+        // held under that controller.
+        for _ in 0..days_held {
+            w.tick();
+        }
+
+        let mut attacker_assets = Vec::new();
+        for _ in 0..6 {
+            attacker_assets.push(
+                w.seed_asset(
+                    attacker,
+                    design,
+                    site,
+                    QualityGrade::Standard,
+                    AssetOrigin::SeededHistorical { note: "attacker".into() },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        let mut defender_assets = Vec::new();
+        for _ in 0..5 {
+            defender_assets.push(
+                w.seed_asset(
+                    defender,
+                    design,
+                    site,
+                    QualityGrade::Standard,
+                    AssetOrigin::SeededHistorical { note: "defender".into() },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        (w, site, attacker, attacker_assets, defender, defender_assets)
+    };
+
+    let (mut fresh_world, site, attacker, attacker_assets, defender, defender_assets) = make_world(0);
+    let fresh_outcome = fresh_world
+        .resolve_battle(site, attacker, &attacker_assets, defender, &defender_assets)
+        .unwrap();
+
+    let (mut dug_in_world, site, attacker, attacker_assets, defender, defender_assets) = make_world(30);
+    let dug_in_outcome = dug_in_world
+        .resolve_battle(site, attacker, &attacker_assets, defender, &defender_assets)
+        .unwrap();
+
+    assert!(
+        dug_in_outcome.defender_effective_power > fresh_outcome.defender_effective_power,
+        "a defender entrenched for 30 days must fight with more effective power than one that just took the ground"
+    );
+    assert!(
+        dug_in_outcome.attacker_win_pct < fresh_outcome.attacker_win_pct,
+        "entrenchment must lower the attacker's real odds of winning"
+    );
+    assert!(fresh_world.check_invariants().is_empty());
+    assert!(dug_in_world.check_invariants().is_empty());
+}
+
+/// Mines should turn up on their own as the world runs, wired into the real
+/// route network so factions can actually reach and fight over them — not
+/// only exist if hand-authored in scenario setup.
+#[test]
+fn mines_are_discovered_procedurally_and_are_reachable() {
+    use adona_sim::events::EventKind;
+    use adona_sim::locations::LocationKind;
+
+    let mut w = World::new(1);
+    w.create_location("Anchor City", LocationKind::City, (0, 0));
+
+    let mut discovered: Option<LocationId> = None;
+    for _ in 0..500 {
+        w.tick();
+        if discovered.is_none() {
+            discovered = w.events().iter().find_map(|e| match &e.kind {
+                EventKind::MineDiscovered { mine } => Some(*mine),
+                _ => None,
+            });
+        }
+    }
+    let mine = discovered.expect("no mine was procedurally discovered within 500 days");
+    let loc = w.location(mine).expect("discovered mine must be a real location");
+    assert_eq!(loc.kind, LocationKind::Mine);
+    assert!(loc.mine_reserves.is_some());
+
+    let reachable = w.routes_iter().any(|r| r.from == mine) && w.routes_iter().any(|r| r.to == mine);
+    assert!(reachable, "a discovered mine must have routes connecting it to the existing map both ways");
+    assert!(w.check_invariants().is_empty());
 }

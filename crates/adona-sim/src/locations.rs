@@ -78,6 +78,9 @@ pub struct Location {
     /// thing that changes this once set (docket: faction-war territory
     /// control); it starts unclaimed.
     pub controller: Option<ActorId>,
+    /// The day `controller` last changed hands. Feeds the entrenchment bonus
+    /// in `combat::resolve_battle` — ground held longer is dug in deeper.
+    pub controlled_since: u64,
 }
 
 /// Where a physical thing currently is. Exactly one of these per lot/asset/
@@ -118,6 +121,7 @@ impl World {
                 unrest_pct: 0,
                 mine_reserves,
                 controller: None,
+                controlled_since: 0,
             },
         );
         self.push_event(EventKind::LocationCreated { location: id });
@@ -251,8 +255,10 @@ impl World {
                 return Err(SimError::UnknownActor(owner));
             }
         }
+        let day = self.clock.day;
         let loc = self.locations.get_mut(&site).ok_or(SimError::UnknownLocation(site))?;
         loc.controller = controller;
+        loc.controlled_since = day;
         self.push_event(EventKind::AdminEdit {
             operator: None,
             description: format!("set {site} controller to {controller:?}"),
@@ -318,4 +324,67 @@ impl World {
             LocationRef::Formation(id) => self.formations.contains_key(&id),
         }
     }
+
+    /// World-generation phase: a small daily chance that prospectors turn up
+    /// a new, unclaimed mine somewhere near the existing map, wired into the
+    /// route network so it is real ground factions can actually reach and
+    /// fight over — never a mine that only exists as a name in a list.
+    /// TODO(worldgen): terrain-aware placement once the map is more than an
+    /// abstract grid (see `Location::position`'s own TODO).
+    pub(crate) fn tick_mine_discovery(&mut self) {
+        const DISCOVERY_CHANCE_PCT: u8 = 3;
+        const INFINITE_CHANCE_PCT: u8 = 10;
+        if self.locations.is_empty() {
+            return;
+        }
+        if self.rng.roll_percent() >= DISCOVERY_CHANCE_PCT {
+            return;
+        }
+
+        let (min_x, max_x, min_y, max_y) = self.locations.values().fold(
+            (i64::MAX, i64::MIN, i64::MAX, i64::MIN),
+            |(min_x, max_x, min_y, max_y), l| {
+                let (x, y) = l.position;
+                (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+            },
+        );
+        // Sample within the existing map's bounding box plus a margin so
+        // discoveries land near the known world instead of arbitrarily far
+        // from anything reachable.
+        let margin = 10;
+        let span_x = (max_x - min_x + 2 * margin).max(1) as u64;
+        let span_y = (max_y - min_y + 2 * margin).max(1) as u64;
+        let x = min_x - margin + self.rng.roll_range(span_x) as i64;
+        let y = min_y - margin + self.rng.roll_range(span_y) as i64;
+
+        let nearest = self
+            .locations
+            .values()
+            .min_by_key(|l| chebyshev_distance(l.position, (x, y)))
+            .map(|l| (l.id, l.position))
+            .expect("checked locations is non-empty above");
+        let distance_days = (chebyshev_distance(nearest.1, (x, y)) / 4).max(1);
+
+        let name = format!("Prospect Site {}", self.next_id);
+        let mine = self.create_location(&name, LocationKind::Mine, (x, y));
+
+        let reserves = if self.rng.roll_percent() < INFINITE_CHANCE_PCT {
+            MineReserves::Infinite
+        } else {
+            MineReserves::Finite { remaining: 5_000 + self.rng.roll_range(45_000) }
+        };
+        self.configure_mine(mine, reserves).expect("mine was just created");
+
+        // Connect both directions: convoys and marching formations only
+        // travel along a route from their current site, so a one-way link
+        // would strand traffic in one direction.
+        let _ = self.create_route(mine, nearest.0, distance_days);
+        let _ = self.create_route(nearest.0, mine, distance_days);
+
+        self.push_event(EventKind::MineDiscovered { mine });
+    }
+}
+
+fn chebyshev_distance(a: (i64, i64), b: (i64, i64)) -> u64 {
+    a.0.abs_diff(b.0).max(a.1.abs_diff(b.1))
 }

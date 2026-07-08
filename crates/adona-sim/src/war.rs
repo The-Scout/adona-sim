@@ -20,9 +20,11 @@ use std::collections::BTreeMap;
 
 impl World {
     /// Automatic territorial combat phase. Deterministic: sites are visited
-    /// in id order, and when more than two factions share a site only the
-    /// two lowest-id owners fight this tick (a full multi-way melee is
-    /// TODO(combat)).
+    /// in id order. When three or more factions share a site, battles
+    /// cascade — the winner of each pairwise fight (with its real surviving
+    /// assets) immediately faces the next owner in id order — so a three-way
+    /// standoff actually resolves in one tick instead of leaving everyone
+    /// past the first two idle next to a live enemy.
     pub(crate) fn tick_faction_war(&mut self) {
         let sites: Vec<LocationId> = self.locations.keys().copied().collect();
         for site in sites {
@@ -44,10 +46,38 @@ impl World {
             }
             let mut owners: Vec<ActorId> = by_owner.keys().copied().collect();
             owners.sort();
-            let (a, b) = (owners[0], owners[1]);
-            let attacker_assets = by_owner[&a].clone();
-            let defender_assets = by_owner[&b].clone();
-            let _ = self.resolve_battle(site, a, &attacker_assets, b, &defender_assets);
+
+            let mut champion = owners[0];
+            let mut champion_assets = by_owner[&champion].clone();
+            for &challenger in &owners[1..] {
+                if champion_assets.is_empty() {
+                    break;
+                }
+                let mut challenger_assets = by_owner[&challenger].clone();
+                challenger_assets.retain(|a| self.assets.get(a).map(|x| x.condition_pct > 0).unwrap_or(false));
+                if challenger_assets.is_empty() {
+                    continue;
+                }
+                let Ok(outcome) =
+                    self.resolve_battle(site, champion, &champion_assets, challenger, &challenger_assets)
+                else {
+                    continue;
+                };
+                let (winner, mut winner_assets) = if outcome.attacker_won {
+                    (champion, champion_assets.clone())
+                } else {
+                    (challenger, challenger_assets.clone())
+                };
+                let losses = if outcome.attacker_won { &outcome.attacker_losses } else { &outcome.defender_losses };
+                winner_assets.retain(|a| !losses.contains(a));
+                champion = winner;
+                champion_assets = winner_assets;
+            }
         }
+
+        // A formation that lost every real asset in combat is no longer a
+        // real formation — drop the empty roster rather than leaving a
+        // ghost entry behind.
+        self.formations.retain(|_, f| !f.assets.is_empty());
     }
 }

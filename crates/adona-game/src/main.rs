@@ -9,12 +9,12 @@
 use adona_sim::actors::{Actor, ActorKind};
 use adona_sim::assets::{AssetKind, AssetOrigin, ComponentCategory, ComponentSlot};
 use adona_sim::contracts::ContractState;
-use adona_sim::convoys::ConvoyState;
+use adona_sim::convoys::{Convoy, ConvoyState};
 use adona_sim::goods::{LegalStatus, LotOrigin, QualityGrade, UnitOfMeasure};
 use adona_sim::ids::ActorId;
 use adona_sim::locations::{CivilianNeed, LocationKind};
 use adona_sim::production::RecipeOutputs;
-use adona_sim::toe::ToeSlot;
+use adona_sim::toe::{Formation, FormationState, ToeSlot};
 use adona_sim::World;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
@@ -37,7 +37,7 @@ fn main() {
         .add_plugins(EguiPlugin)
         .insert_resource(SimWorld(build_demo_world()))
         .add_systems(Startup, setup_camera)
-        .add_systems(Update, (ui_panels, draw_map))
+        .add_systems(Update, (ui_panels, draw_map, hover_tooltip))
         .run();
 }
 
@@ -182,6 +182,44 @@ fn map_pos(position: (i64, i64)) -> Vec2 {
     Vec2::new(position.0 as f32, position.1 as f32) * MAP_SCALE
 }
 
+/// A site's drawn (and hoverable) radius: a little larger for cities than
+/// outposts, shared by drawing and hit-testing so they can never drift apart.
+fn location_radius(kind: LocationKind) -> f32 {
+    match kind {
+        LocationKind::City => 18.0,
+        _ => 12.0,
+    }
+}
+
+/// Where a formation's marker is drawn relative to its home site: small
+/// squares offset from the site so multiple factions holding the same
+/// ground are visible as separate marks (the setup for the automatic
+/// ant-sim clash).
+fn formation_marker_offset(index: usize) -> Vec2 {
+    Vec2::new(-20.0 + (index as f32 % 3.0) * 10.0, -20.0 - (index as f32 / 3.0).floor() * 10.0)
+}
+
+/// A convoy's current world position, whether sitting at a site or
+/// interpolated along its route while en route — real movement, drawn
+/// honestly as "on the road" rather than snapped to either endpoint.
+/// `None` for a disbanded convoy or one whose site/route no longer resolves.
+fn convoy_marker_pos(w: &World, convoy: &Convoy) -> Option<Vec2> {
+    match convoy.state {
+        ConvoyState::Forming { at } | ConvoyState::Arrived { at } => {
+            Some(map_pos(w.location(at)?.position) + Vec2::new(0.0, 20.0))
+        }
+        ConvoyState::EnRoute { route, departed_day, arrives_day } => {
+            let r = w.route(route)?;
+            let from = w.location(r.from)?;
+            let to = w.location(r.to)?;
+            let span = (arrives_day - departed_day).max(1) as f32;
+            let progress = ((w.today() - departed_day) as f32 / span).clamp(0.0, 1.0);
+            Some(map_pos(from.position).lerp(map_pos(to.position), progress))
+        }
+        ConvoyState::Disbanded => None,
+    }
+}
+
 fn draw_map(sim: Res<SimWorld>, mut gizmos: Gizmos) {
     let w = &sim.0;
 
@@ -195,48 +233,173 @@ fn draw_map(sim: Res<SimWorld>, mut gizmos: Gizmos) {
     // cities than outposts.
     for loc in w.locations_iter() {
         let pos = map_pos(loc.position);
-        let radius = match loc.kind {
-            adona_sim::locations::LocationKind::City => 18.0,
-            _ => 12.0,
-        };
         let color = loc.controller.map(actor_color).unwrap_or(Color::srgb(0.4, 0.4, 0.4));
-        gizmos.circle_2d(pos, radius, color);
+        gizmos.circle_2d(pos, location_radius(loc.kind), color);
     }
 
     // Convoys: a small marker at their site, or interpolated along the
-    // route while en route — real movement, drawn honestly as "on the
-    // road" rather than snapped to either endpoint.
+    // route while en route.
     for convoy in w.convoys_iter() {
-        let color = actor_color(convoy.owner);
-        match convoy.state {
-            ConvoyState::Forming { at } | ConvoyState::Arrived { at } => {
-                if let Some(loc) = w.location(at) {
-                    gizmos.circle_2d(map_pos(loc.position) + Vec2::new(0.0, 20.0), 4.0, color);
-                }
-            }
-            ConvoyState::EnRoute { route, departed_day, arrives_day } => {
-                let Some(r) = w.route(route) else { continue };
-                let (Some(from), Some(to)) = (w.location(r.from), w.location(r.to)) else { continue };
-                let span = (arrives_day - departed_day).max(1) as f32;
-                let progress = ((w.today() - departed_day) as f32 / span).clamp(0.0, 1.0);
-                let pos = map_pos(from.position).lerp(map_pos(to.position), progress);
-                gizmos.circle_2d(pos, 5.0, color);
-            }
-            ConvoyState::Disbanded => {}
-        }
+        let Some(pos) = convoy_marker_pos(w, convoy) else { continue };
+        gizmos.circle_2d(pos, 5.0, actor_color(convoy.owner));
     }
 
     // Formations: small squares offset from their home site, one per
-    // formation, so multiple factions holding the same ground are visible
-    // as separate marks (the setup for the automatic ant-sim clash).
+    // formation.
     for (i, formation) in w.formations_iter().enumerate() {
         if let Some(at) = formation.current_site() {
             if let Some(loc) = w.location(at) {
-                let offset = Vec2::new(-20.0 + (i as f32 % 3.0) * 10.0, -20.0 - (i as f32 / 3.0).floor() * 10.0);
-                let pos = map_pos(loc.position) + offset;
-                let color = actor_color(formation.owner);
-                gizmos.rect_2d(pos, Vec2::splat(8.0), color);
+                let pos = map_pos(loc.position) + formation_marker_offset(i);
+                gizmos.rect_2d(pos, Vec2::splat(8.0), actor_color(formation.owner));
             }
+        }
+    }
+}
+
+/// Cursor -> world-space conversion for the primary camera, used only for
+/// hover hit-testing (drawing stays purely in `Gizmos`' own world space).
+fn cursor_world_pos(
+    windows: &Query<&Window>,
+    camera_q: &Query<(&Camera, &GlobalTransform)>,
+) -> Option<Vec2> {
+    let window = windows.iter().next()?;
+    let cursor = window.cursor_position()?;
+    let (camera, camera_transform) = camera_q.iter().next()?;
+    camera.viewport_to_world_2d(camera_transform, cursor).ok()
+}
+
+fn actor_name(w: &World, id: ActorId) -> String {
+    w.actor(id).map(|a| a.name.clone()).unwrap_or_else(|| format!("actor {id}"))
+}
+
+fn formation_tooltip(ui: &mut egui::Ui, w: &World, formation: &Formation) {
+    ui.strong(&formation.name);
+    ui.label(format!("owner: {}", actor_name(w, formation.owner)));
+    if let Some(template) = w.toe_template(formation.template) {
+        ui.label(format!("doctrine: {}", template.name));
+    }
+    ui.label(format!("assets: {}", formation.assets.len()));
+    let mut by_design: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for &asset_id in &formation.assets {
+        if let Some(asset) = w.asset(asset_id) {
+            let name = w.design(asset.design).map(|d| d.name.clone()).unwrap_or_else(|| "unknown design".into());
+            *by_design.entry(name).or_insert(0) += 1;
+        }
+    }
+    for (name, count) in by_design {
+        ui.label(format!("  {count}x {name}"));
+    }
+    match formation.state {
+        FormationState::Stationed { .. } => {
+            ui.label("stationed");
+        }
+        FormationState::EnRoute { arrives_day, .. } => {
+            ui.label(format!("en route, arrives day {arrives_day}"));
+        }
+    }
+}
+
+fn convoy_tooltip(ui: &mut egui::Ui, w: &World, convoy: &Convoy) {
+    ui.strong(format!("Convoy {}", convoy.id));
+    ui.label(format!("owner: {}", actor_name(w, convoy.owner)));
+    match convoy.state {
+        ConvoyState::Forming { .. } => {
+            ui.label("forming");
+        }
+        ConvoyState::Arrived { .. } => {
+            ui.label("arrived");
+        }
+        ConvoyState::EnRoute { departed_day, arrives_day, .. } => {
+            let span = (arrives_day - departed_day).max(1) as f32;
+            let progress = ((w.today() - departed_day) as f32 / span * 100.0).clamp(0.0, 100.0);
+            ui.label(format!("en route, {progress:.0}% (arrives day {arrives_day})"));
+        }
+        ConvoyState::Disbanded => {
+            ui.label("disbanded");
+        }
+    }
+    ui.label(format!("vehicles: {}", convoy.vehicles.len()));
+    ui.label(format!("guards: {}", convoy.guards.len()));
+    ui.label(format!("cargo: {} lots, {} assets", convoy.cargo_lots.len(), convoy.cargo_assets.len()));
+}
+
+fn location_tooltip(ui: &mut egui::Ui, w: &World, loc: &adona_sim::locations::Location) {
+    ui.strong(&loc.name);
+    ui.label(format!("{:?}", loc.kind));
+    let owner = loc.controller.map(|id| actor_name(w, id)).unwrap_or_else(|| "unclaimed".into());
+    ui.label(format!("controlled by: {owner}"));
+    if loc.population > 0 {
+        ui.label(format!("population: {} (unrest {}%)", loc.population, loc.unrest_pct));
+    }
+    if let Some(reserves) = loc.mine_reserves {
+        match reserves {
+            adona_sim::locations::MineReserves::Infinite => {
+                ui.label("mine reserves: infinite");
+            }
+            adona_sim::locations::MineReserves::Finite { remaining } => {
+                ui.label(format!("mine reserves: {remaining} remaining"));
+            }
+        }
+    }
+    let mut by_owner: std::collections::BTreeMap<ActorId, u32> = std::collections::BTreeMap::new();
+    for formation in w.formations_iter() {
+        if formation.current_site() == Some(loc.id) {
+            *by_owner.entry(formation.owner).or_insert(0) += formation.assets.len() as u32;
+        }
+    }
+    if !by_owner.is_empty() {
+        ui.label("forces present:");
+        for (owner, count) in by_owner {
+            ui.label(format!("  {}: {count} assets", actor_name(w, owner)));
+        }
+    }
+}
+
+/// Hover hit-testing: convert the cursor to world space and check, in
+/// priority order from smallest/most specific to largest, whether it's over
+/// a formation marker, a convoy marker, or a site — the first hit wins so a
+/// formation square drawn over a city doesn't get shadowed by the city's
+/// bigger circle. Shows an egui tooltip with real state, not a static label.
+fn hover_tooltip(
+    sim: Res<SimWorld>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform)>,
+    mut contexts: EguiContexts,
+) {
+    let w = &sim.0;
+    let Some(cursor) = cursor_world_pos(&windows, &camera_q) else { return };
+    let ctx = contexts.ctx_mut();
+    let tooltip_layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("adona_hover_layer"));
+
+    for (i, formation) in w.formations_iter().enumerate() {
+        let Some(at) = formation.current_site() else { continue };
+        let Some(loc) = w.location(at) else { continue };
+        let pos = map_pos(loc.position) + formation_marker_offset(i);
+        if cursor.distance(pos) <= 8.0 {
+            egui::show_tooltip_at_pointer(ctx, tooltip_layer, egui::Id::new("adona_hover"), |ui| {
+                formation_tooltip(ui, w, formation);
+            });
+            return;
+        }
+    }
+
+    for convoy in w.convoys_iter() {
+        let Some(pos) = convoy_marker_pos(w, convoy) else { continue };
+        if cursor.distance(pos) <= 6.0 {
+            egui::show_tooltip_at_pointer(ctx, tooltip_layer, egui::Id::new("adona_hover"), |ui| {
+                convoy_tooltip(ui, w, convoy);
+            });
+            return;
+        }
+    }
+
+    for loc in w.locations_iter() {
+        let pos = map_pos(loc.position);
+        if cursor.distance(pos) <= location_radius(loc.kind) {
+            egui::show_tooltip_at_pointer(ctx, tooltip_layer, egui::Id::new("adona_hover"), |ui| {
+                location_tooltip(ui, w, loc);
+            });
+            return;
         }
     }
 }

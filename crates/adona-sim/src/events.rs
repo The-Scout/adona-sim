@@ -49,6 +49,10 @@ pub enum EventKind {
     /// purchased goods."
     GoodsConsumed { lot: LotId, commodity: CommodityId, owner: ActorId, quantity: u64 },
     MineYield { mine: LocationId, lot: LotId, quantity: u64 },
+    /// Procedural world-gen: a new, unclaimed mine appeared and was wired
+    /// into the route network (docket: mines should turn up on their own,
+    /// not only by hand-authored scenario setup).
+    MineDiscovered { mine: LocationId },
 
     AssetCreated { asset: AssetId, design: DesignId, owner: ActorId },
     AssetMoved { asset: AssetId, from: LocationRef, to: LocationRef },

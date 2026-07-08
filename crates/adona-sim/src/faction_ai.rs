@@ -186,33 +186,70 @@ impl World {
     }
 
     /// Automatic deployment phase: a formation stationed on ground its own
-    /// owner controls marches toward the first (by route id, for
-    /// determinism) adjacent site it does *not* control — contested or
-    /// enemy-held territory — instead of sitting still forever. This is the
-    /// war AI's answer to docket TODO(war): factions actively press toward
-    /// contested/enemy ground rather than only fighting where formations
-    /// already happen to be. A formation already standing on contested or
-    /// enemy ground is left alone; that's what `tick_faction_war` is for.
+    /// owner controls marches toward an adjacent site it does *not*
+    /// control — contested or enemy-held territory — instead of sitting
+    /// still forever. This is the war AI's answer to docket TODO(war):
+    /// factions actively press toward contested/enemy ground rather than
+    /// only fighting where formations already happen to be. A formation
+    /// already standing on contested or enemy ground is left alone; that's
+    /// what `tick_faction_war` is for.
+    ///
+    /// Holding the line: a site with an outgoing route to non-owned ground
+    /// is a frontline site, and one formation is always kept there as a
+    /// garrison rather than every defender marching off at once — only
+    /// formations beyond the first are eligible to advance. Interior sites
+    /// (no route to non-owned ground) have nothing to hold, so every
+    /// formation there is free to march. Among eligible destinations, the
+    /// AI prefers the one held by the fewest real defending assets — pushing
+    /// where the enemy is weakest — tie-broken by route id for determinism.
     pub(crate) fn tick_faction_deployment(&mut self) {
-        let formations: Vec<FormationId> = self.formations.keys().copied().collect();
-        for fid in formations {
-            let Some(formation) = self.formations.get(&fid) else { continue };
+        let mut by_site: BTreeMap<(ActorId, LocationId), Vec<FormationId>> = BTreeMap::new();
+        for (fid, formation) in &self.formations {
             let Some(at) = formation.current_site() else { continue };
             let owner = formation.owner;
-            let home_controller = self.locations.get(&at).and_then(|l| l.controller);
-            if home_controller != Some(owner) {
+            if self.locations.get(&at).and_then(|l| l.controller) != Some(owner) {
                 continue;
             }
-            let mut routes: Vec<&Route> = self.routes.values().filter(|r| r.from == at).collect();
+            by_site.entry((owner, at)).or_default().push(*fid);
+        }
+
+        for ((owner, at), mut formations) in by_site {
+            formations.sort();
+            let mut routes: Vec<Route> = self.routes.values().filter(|r| r.from == at).cloned().collect();
             routes.sort_by_key(|r| r.id);
-            for route in routes {
-                let dest_controller = self.locations.get(&route.to).and_then(|l| l.controller);
-                if dest_controller != Some(owner) {
+            let is_frontline = routes
+                .iter()
+                .any(|r| self.locations.get(&r.to).and_then(|l| l.controller) != Some(owner));
+
+            // Keep one garrison formation on a frontline site; interior
+            // sites have nothing to hold.
+            let eligible: Vec<FormationId> = if is_frontline {
+                formations.into_iter().skip(1).collect()
+            } else {
+                formations
+            };
+
+            for fid in eligible {
+                let target = routes
+                    .iter()
+                    .filter(|r| self.locations.get(&r.to).and_then(|l| l.controller) != Some(owner))
+                    .min_by_key(|r| (self.defending_asset_count(r.to), r.id));
+                if let Some(route) = target {
                     let route_id = route.id;
                     let _ = self.order_formation_march(fid, route_id);
-                    break;
                 }
             }
         }
+    }
+
+    /// Real defending strength at a site: total assets across every
+    /// formation stationed there, the same signal the deployment AI itself
+    /// can see (no hidden knowledge of enemy strength).
+    fn defending_asset_count(&self, site: LocationId) -> usize {
+        self.formations
+            .values()
+            .filter(|f| f.current_site() == Some(site))
+            .map(|f| f.assets.len())
+            .sum()
     }
 }
