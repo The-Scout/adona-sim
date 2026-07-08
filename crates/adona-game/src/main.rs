@@ -230,11 +230,13 @@ fn draw_map(sim: Res<SimWorld>, mut gizmos: Gizmos) {
     // formation, so multiple factions holding the same ground are visible
     // as separate marks (the setup for the automatic ant-sim clash).
     for (i, formation) in w.formations_iter().enumerate() {
-        if let Some(loc) = w.location(formation.home) {
-            let offset = Vec2::new(-20.0 + (i as f32 % 3.0) * 10.0, -20.0 - (i as f32 / 3.0).floor() * 10.0);
-            let pos = map_pos(loc.position) + offset;
-            let color = actor_color(formation.owner);
-            gizmos.rect_2d(pos, Vec2::splat(8.0), color);
+        if let Some(at) = formation.current_site() {
+            if let Some(loc) = w.location(at) {
+                let offset = Vec2::new(-20.0 + (i as f32 % 3.0) * 10.0, -20.0 - (i as f32 / 3.0).floor() * 10.0);
+                let pos = map_pos(loc.position) + offset;
+                let color = actor_color(formation.owner);
+                gizmos.rect_2d(pos, Vec2::splat(8.0), color);
+            }
         }
     }
 }

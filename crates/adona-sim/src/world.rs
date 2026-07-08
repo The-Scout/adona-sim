@@ -113,8 +113,9 @@ impl World {
 
     /// Advance one strategic day, in fixed deterministic phase order:
     /// sub-day quarter events (contact/interception windows), production
-    /// completions, convoy movement, civilian demand, faction planning,
-    /// market matching, population.
+    /// completions, convoy movement, formation movement, civilian demand,
+    /// faction planning, faction deployment (marching on contested/enemy
+    /// ground), faction war, market matching, population.
     pub fn tick(&mut self) {
         self.clock.advance_day();
         let day = self.clock.day;
@@ -125,8 +126,10 @@ impl World {
         }
         self.tick_production();
         self.tick_convoys();
+        self.tick_formations();
         self.tick_civilian_demand();
         self.tick_faction_ai();
+        self.tick_faction_deployment();
         self.tick_faction_war();
         self.tick_market_matching();
         self.tick_population();

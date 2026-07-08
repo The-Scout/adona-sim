@@ -16,6 +16,7 @@
 //! fields still has to come from production or trade, exactly like a player.
 
 use crate::actors::Credits;
+use crate::convoys::Route;
 use crate::events::EventKind;
 use crate::goods::LotState;
 use crate::ids::*;
@@ -182,5 +183,36 @@ impl World {
             .filter_map(|by_commodity| by_commodity.get(&commodity))
             .copied()
             .max()
+    }
+
+    /// Automatic deployment phase: a formation stationed on ground its own
+    /// owner controls marches toward the first (by route id, for
+    /// determinism) adjacent site it does *not* control — contested or
+    /// enemy-held territory — instead of sitting still forever. This is the
+    /// war AI's answer to docket TODO(war): factions actively press toward
+    /// contested/enemy ground rather than only fighting where formations
+    /// already happen to be. A formation already standing on contested or
+    /// enemy ground is left alone; that's what `tick_faction_war` is for.
+    pub(crate) fn tick_faction_deployment(&mut self) {
+        let formations: Vec<FormationId> = self.formations.keys().copied().collect();
+        for fid in formations {
+            let Some(formation) = self.formations.get(&fid) else { continue };
+            let Some(at) = formation.current_site() else { continue };
+            let owner = formation.owner;
+            let home_controller = self.locations.get(&at).and_then(|l| l.controller);
+            if home_controller != Some(owner) {
+                continue;
+            }
+            let mut routes: Vec<&Route> = self.routes.values().filter(|r| r.from == at).collect();
+            routes.sort_by_key(|r| r.id);
+            for route in routes {
+                let dest_controller = self.locations.get(&route.to).and_then(|l| l.controller);
+                if dest_controller != Some(owner) {
+                    let route_id = route.id;
+                    let _ = self.order_formation_march(fid, route_id);
+                    break;
+                }
+            }
+        }
     }
 }

@@ -5,15 +5,8 @@ remote exists.
 
 ## Open
 
-### Factions do not move, and simulation behavior beyond ~day 100 is unverified
+### Simulation behavior beyond ~day 100 is unverified
 
-- **Factions do not move.** `war.rs`'s automatic combat phase only fights
-  formations that already physically share a site — there is no
-  deployment/movement AI that marches a formation toward contested or enemy
-  territory. Faction "war" today is limited to whatever co-location happens
-  to already exist (e.g. from manual/admin setup). This is the same gap
-  called out as `TODO(war)` in `crates/adona-sim/src/war.rs` and
-  `crates/adona-sim/src/toe.rs`.
 - **Long-run tick behavior (~100+ days) is unverified.** No test currently
   runs the simulation for an extended number of ticks (existing tests run at
   most tens of days). It's unconfirmed whether the tick phases (production,
@@ -26,6 +19,13 @@ remote exists.
 
 ## Other known gaps (not bugs, staged intentionally)
 
+- Formation deployment AI (`World::tick_faction_deployment` in
+  `faction_ai.rs`) is a first-cut greedy rule: a formation stationed on its
+  own controlled ground marches one hop, along the first route (by id) that
+  leads to a site it doesn't control. There is no multi-hop pathfinding
+  toward a specific objective, no retreat/refit logic for damaged
+  formations, and no coordination between multiple formations converging on
+  the same target.
 - Convoy interception and stockpile raiding are not implemented as combat
   shapes; `AttackTarget` contracts against those target kinds still complete
   on caller assertion rather than verified outcome (`contracts.rs`).

@@ -301,7 +301,7 @@ impl World {
                     current = self.assets.get(&a)?.location;
                 }
                 LocationRef::Formation(fm) => {
-                    return self.formations.get(&fm).map(|f| f.home);
+                    return self.formations.get(&fm).and_then(|f| f.current_site());
                 }
             }
         }

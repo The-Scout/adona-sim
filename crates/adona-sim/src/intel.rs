@@ -218,7 +218,7 @@ impl World {
             }
             IntelSubject::Formation(f) => {
                 let formation = self.formations.get(&f).ok_or(SimError::UnknownFormation(f))?;
-                Ok(Some(formation.home != obs.observed_at))
+                Ok(Some(formation.current_site() != Some(obs.observed_at)))
             }
             IntelSubject::StockpileSite(site) => {
                 // Stale once any real cargo has moved into or out of a

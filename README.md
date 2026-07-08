@@ -1,4 +1,4 @@
-# ADONA
+# ADONA: Warsim
 
 A headless, engine-agnostic Rust workspace for simulating a strategic
 economy and factional war — the foundation layer for ADONA, a mercenary
@@ -29,12 +29,15 @@ game engine, an art pipeline, or gameplay code to be useful on its own.
    from (a mine, a factory job, a seeded historical stock, an import) —
    split, merge, trade, and salvage all preserve that lineage instead of
    laundering it into an anonymous inventory count.
-2. **A factional war simulation** where factions compete to form
-   frontlines and capture each other's territory. Combat resolves from
-   real assembled forces (never spawned units), defenders get a mechanical
-   home-ground edge, and territory control changes hands on the outcome —
-   automatically, every tick, whenever hostile forces occupy the same
-   ground.
+2. **A factional war simulation** where factions compete to capture each
+   other's territory. Combat resolves from real assembled forces (never
+   spawned units), defenders get a mechanical home-ground edge, and
+   territory control changes hands on the outcome — automatically, every
+   tick, whenever hostile forces occupy the same ground. Formations also
+   march on their own: a formation stationed on ground its faction controls
+   automatically routes toward the nearest contested or enemy-held site and
+   fights on arrival — a first-cut greedy rule, not full pathfinding or
+   campaign-level coordination (see [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)).
 3. **A database-backed living economy** — currently PostgreSQL, with the
    storage boundary (`SimStore`) designed so other backends (SQLite, etc.)
    are a matter of writing an adapter, not restructuring the simulation —
