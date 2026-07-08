@@ -10,7 +10,7 @@ change toward a copyleft model (e.g. something in the MPL/LGPL/AGPL family)
 for parts of the project, to keep improvements to the shared simulation
 flowing back to the community rather than being closed off downstream.
 
-Two things are intended to stay true even if that happens:
+These terms are intended to stay true even if that happens:
 
 - **Any code already released under MIT/Apache-2.0 stays available under
   those terms.** A future license change would apply to new releases going
