@@ -6,15 +6,14 @@
 //! onto the headless simulation, not the cockpit/tactical game (that is
 //! separate, later work per the docket's staging).
 
-use adona_sim::actors::{Actor, ActorKind};
-use adona_sim::assets::{AssetKind, AssetOrigin, ComponentCategory, ComponentSlot};
+mod seed;
+
+use adona_sim::actors::Actor;
 use adona_sim::contracts::ContractState;
 use adona_sim::convoys::{Convoy, ConvoyState};
-use adona_sim::goods::{LegalStatus, LotOrigin, QualityGrade, UnitOfMeasure};
 use adona_sim::ids::ActorId;
-use adona_sim::locations::{CivilianNeed, LocationKind};
-use adona_sim::production::RecipeOutputs;
-use adona_sim::toe::{Formation, FormationState, ToeSlot};
+use adona_sim::locations::LocationKind;
+use adona_sim::toe::{Formation, FormationState};
 use adona_sim::World;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
@@ -35,7 +34,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(EguiPlugin)
-        .insert_resource(SimWorld(build_demo_world()))
+        .insert_resource(SimWorld(load_seeded_world()))
         .add_systems(Startup, setup_camera)
         .add_systems(Update, (ui_panels, draw_map, hover_tooltip))
         .run();
@@ -45,130 +44,14 @@ fn setup_camera(mut commands: Commands) {
     commands.spawn(Camera2d);
 }
 
-/// Seed a small two-faction economy so there is something to watch
-/// immediately, mirroring `adona-sim`'s own `examples/demo.rs` scenario.
-fn build_demo_world() -> World {
-    let mut w = World::new(42);
-
-    let karth = w.create_actor("Karth Directorate", ActorKind::Faction, 1_000_000);
-    let veyra = w.create_actor("Veyra Compact", ActorKind::Faction, 1_000_000);
-    let authority = w.create_actor("Meridian City Authority", ActorKind::CityAuthority, 60_000);
-
-    let meridian = w.create_location("Meridian", LocationKind::City, (0, 0));
-    let mine = w.create_location("Redrock Mine", LocationKind::Mine, (10, 4));
-    let forge = w.create_location("Forge Complex", LocationKind::FactorySite, (5, -6));
-
-    let iron_ore = w.define_commodity("Iron Ore", UnitOfMeasure::Kilograms, 1, 2);
-    let armor_plate = w.define_commodity("Armor Plate", UnitOfMeasure::Kilograms, 2, 40);
-    let food = w.define_commodity("Food", UnitOfMeasure::Units, 1, 3);
-
-    w.configure_city(
-        meridian,
-        10_000,
-        Some(authority),
-        vec![CivilianNeed { commodity: food, quantity_per_day: 500 }],
-    )
-    .unwrap();
-    w.set_tax_rate(meridian, 1).unwrap();
-    let market = w.create_market("Meridian Exchange", meridian, None).unwrap();
-
-    let truck_design =
-        w.define_design("Hauler-6 Truck", AssetKind::Vehicle, vec![], Some(20_000), None).unwrap();
-    let mech_slots: Vec<_> = ["Leg Actuator", "Weapon Barrel", "Ammo Feed", "Reactor Feed", "Cooling Assembly"]
-        .into_iter()
-        .map(|name| {
-            let def = w.define_component_def(name, 2, ComponentCategory::MechOrEquipment);
-            ComponentSlot { name: name.to_string(), accepts: vec![def] }
-        })
-        .collect();
-    let talon_design = w.define_design("TLN-3 Talon", AssetKind::Mech, mech_slots, None, None).unwrap();
-    let tooling_design =
-        w.define_design("Armor Plate Line", AssetKind::FactoryTooling, vec![], None, None).unwrap();
-
-    let ore = w.produce_from_mine(mine, karth, iron_ore, 10_000, QualityGrade::Standard).unwrap();
-    let truck = w
-        .seed_asset(
-            karth,
-            truck_design,
-            mine,
-            QualityGrade::Standard,
-            AssetOrigin::SeededHistorical { note: "pre-war logistics fleet".into() },
-            Some("Old Reliable"),
-        )
-        .unwrap();
-    let route = w.create_route(mine, forge, 2).unwrap();
-    let convoy = w.form_convoy(karth, mine, &[truck]).unwrap();
-    w.load_lot_onto_convoy(convoy, ore).unwrap();
-    w.depart_convoy(convoy, route).unwrap();
-
-    let factory = w.create_factory(karth, forge, 1).unwrap();
-    let tooling = w
-        .seed_asset(
-            karth,
-            tooling_design,
-            forge,
-            QualityGrade::Standard,
-            AssetOrigin::SeededHistorical { note: "pre-war plant equipment".into() },
-            None,
-        )
-        .unwrap();
-    w.install_tooling(factory, tooling, 0, 0).unwrap();
-    for category in ComponentCategory::FACTORY_SLOTS {
-        let def = w.define_component_def("Forge Complex sub-system", 1, category);
-        let comp = w
-            .seed_component(
-                karth,
-                def,
-                forge,
-                QualityGrade::Standard,
-                AssetOrigin::SeededHistorical { note: "pre-war plant equipment".into() },
-            )
-            .unwrap();
-        w.fit_factory_component(factory, comp).unwrap();
-    }
-    w.define_recipe(
-        "Roll Armor Plate",
-        vec![(iron_ore, 8_000)],
-        RecipeOutputs::Commodity { commodity: armor_plate, quantity: 4_000 },
-        3,
-        Some(tooling_design),
-    );
-
-    let grain = w
-        .seed_lot(
-            karth,
-            food,
-            6_000,
-            QualityGrade::Standard,
-            LegalStatus::Legitimate,
-            meridian,
-            LotOrigin::SeededHistorical { note: "grain reserve".into() },
-        )
-        .unwrap();
-    w.list_lot_for_sale(karth, market, grain, 3).unwrap();
-
-    for i in 0..2 {
-        w.seed_asset(
-            veyra,
-            talon_design,
-            meridian,
-            QualityGrade::Standard,
-            AssetOrigin::SeededHistorical { note: format!("pre-war mech {i}") },
-            None,
-        )
-        .unwrap();
-    }
-    let lance = w.define_toe_template(
-        "Talon Lance",
-        "line-defense",
-        vec![ToeSlot { role: "Line Mech".into(), design: talon_design, count: 3 }],
-    );
-    w.set_faction_goal(veyra, lance, meridian).unwrap();
-    w.set_territory_controller(meridian, Some(veyra)).unwrap();
-    w.set_territory_controller(forge, Some(karth)).unwrap();
-    w.set_territory_controller(mine, Some(karth)).unwrap();
-
-    w
+/// Load the game's real faction content from `assets/world_seed.json` — a
+/// moddable data file, not hardcoded Rust — and build a `World` from it.
+fn load_seeded_world() -> World {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/world_seed.json");
+    let data = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read world seed {path:?}: {e}"));
+    let file: seed::WorldSeedFile =
+        serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse world seed {path:?}: {e}"));
+    seed::build_world(&file).unwrap_or_else(|e| panic!("failed to build seeded world: {e}"))
 }
 
 /// Stable, deterministic color per actor so the same faction reads as the

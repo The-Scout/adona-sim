@@ -90,6 +90,8 @@ dependencies = [
  "adona-sim",
  "bevy",
  "bevy_egui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
