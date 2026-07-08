@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+
+# Game design docs, worldbuilding, and Q&A notes. This repo is the public
+# engine-agnostic simulation crate; the game design material built on top of
+# it stays local/private for now.
+/docs/design/

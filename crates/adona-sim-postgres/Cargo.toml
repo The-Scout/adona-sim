@@ -1,0 +1,11 @@
+[package]
+name = "adona-sim-postgres"
+description = "PostgreSQL storage adapter for adona-sim: SimStore backed by a snapshot table and an append-only events table."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adona-sim = { path = "../adona-sim" }
+serde_json = { workspace = true }
+postgres = { version = "0.19", features = ["with-serde_json-1"] }

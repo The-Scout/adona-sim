@@ -1,0 +1,11 @@
+[package]
+name = "adona-game"
+description = "ADONA strategic observer view: a Bevy GUI over adona-sim. Watches the faction-war economy and the ant-sim tick by itself; the cockpit/tactical game layer is separate, later work."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adona-sim = { path = "../adona-sim" }
+bevy = "0.15"
+bevy_egui = "0.31"
