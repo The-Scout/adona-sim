@@ -63,6 +63,8 @@ pub enum SimError {
     InvalidAssetKind(AssetId),
     /// Convoy is not at a site (it is en route or disbanded).
     ConvoyNotAtSite(ConvoyId),
+    /// Formation is not at a site (it is already en route).
+    FormationNotAtSite(FormationId),
     /// Factory tooling missing or bound to a different exact design.
     ToolingMismatch { factory: FactoryId },
     /// Goods in a sequestered stockpile cannot be freely traded.
@@ -140,6 +142,7 @@ impl std::fmt::Display for SimError {
             InvalidLocationKind(id) => write!(f, "{id} is the wrong kind of location"),
             InvalidAssetKind(id) => write!(f, "{id} is the wrong kind of asset"),
             ConvoyNotAtSite(id) => write!(f, "{id} is not at a site"),
+            FormationNotAtSite(id) => write!(f, "{id} is not at a site"),
             ToolingMismatch { factory } => {
                 write!(f, "{factory} lacks the exact tooling this recipe requires")
             }

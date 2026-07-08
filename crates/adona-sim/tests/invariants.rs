@@ -960,6 +960,90 @@ fn hostile_formations_sharing_a_site_fight_automatically_each_tick() {
 }
 
 #[test]
+fn formations_march_on_contested_ground_and_fight_on_arrival() {
+    use adona_sim::events::EventKind;
+    use adona_sim::toe::FormationState;
+
+    let mut w = World::new(23);
+    let karth = w.create_actor("Karth Directorate", ActorKind::Faction, 0);
+    let veyra = w.create_actor("Veyra Compact", ActorKind::Faction, 0);
+    let home = w.create_location("Karth Home Ground", LocationKind::Battlefield, (0, 0));
+    let frontier = w.create_location("Contested Frontier", LocationKind::Battlefield, (1, 0));
+    w.set_territory_controller(home, Some(karth)).unwrap();
+    // frontier is Veyra-held ground: Karth's formation must not already be
+    // standing there, or this would just be the ordinary co-location fight.
+    w.set_territory_controller(frontier, Some(veyra)).unwrap();
+    let route = w.create_route(home, frontier, 2).unwrap();
+
+    let mech_slots: Vec<_> = (0..5)
+        .map(|i| {
+            let def = w.define_component_def(&format!("Part {i}"), 1, ComponentCategory::MechOrEquipment);
+            ComponentSlot { name: format!("Slot {i}"), accepts: vec![def] }
+        })
+        .collect();
+    let design = w.define_design("Grunt", AssetKind::Mech, mech_slots, None, None).unwrap();
+
+    let make_formation = |w: &mut World, owner: ActorId, at: LocationId, n: u32| -> FormationId {
+        let mut assets = Vec::new();
+        for _ in 0..n {
+            assets.push(
+                w.seed_asset(
+                    owner,
+                    design,
+                    at,
+                    QualityGrade::Standard,
+                    AssetOrigin::SeededHistorical { note: "line mech".into() },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        let template =
+            w.define_toe_template("Ad Hoc", "line", vec![ToeSlot { role: "Line".into(), design, count: n }]);
+        w.try_assemble_formation(owner, template, "Ad Hoc Force", at).unwrap()
+    };
+    let karth_formation = make_formation(&mut w, karth, home, 5);
+    // A lone outmatched defender already sitting on the frontier: enough to
+    // prove the battle really happened, not enough to win it.
+    make_formation(&mut w, veyra, frontier, 1);
+
+    // Tick 1: Karth's formation, stationed on its own controlled ground with
+    // a route to Veyra-held ground, marches automatically — no manual order
+    // given.
+    w.tick();
+    match w.formation(karth_formation).unwrap().state {
+        FormationState::EnRoute { route: r, .. } => assert_eq!(r, route),
+        other => panic!("formation on controlled ground with a hostile-held neighbor did not march: {other:?}"),
+    }
+    assert!(w.formation(karth_formation).unwrap().current_site().is_none(), "en route formation is on no site");
+    let marched = w
+        .events()
+        .iter()
+        .any(|e| matches!(&e.kind, EventKind::FormationMarchOrdered { formation, .. } if *formation == karth_formation));
+    assert!(marched, "no FormationMarchOrdered event was recorded");
+    assert!(w.check_invariants().is_empty());
+
+    // Tick 2: still en route (2-day route), cannot fight, cannot be ordered
+    // to march again.
+    w.tick();
+    assert!(matches!(w.formation(karth_formation).unwrap().state, FormationState::EnRoute { .. }));
+    assert_eq!(w.order_formation_march(karth_formation, route), Err(SimError::FormationNotAtSite(karth_formation)));
+
+    // Tick 3: arrives at the frontier and, sharing hostile ground with
+    // Veyra's formation, fights automatically the same tick it lands.
+    let before = w.events().len();
+    w.tick();
+    assert_eq!(w.formation(karth_formation).unwrap().current_site(), Some(frontier));
+    let arrived = w.events()[before..]
+        .iter()
+        .any(|e| matches!(&e.kind, EventKind::FormationArrived { formation, at } if *formation == karth_formation && *at == frontier));
+    assert!(arrived, "no FormationArrived event was recorded");
+    let fought = w.events()[before..].iter().any(|e| matches!(&e.kind, EventKind::BattleResolved { .. }));
+    assert!(fought, "formation did not fight immediately on arrival at hostile ground");
+    assert!(w.check_invariants().is_empty());
+}
+
+#[test]
 fn haul_cargo_contracts_only_complete_once_cargo_really_arrives() {
     let mut s = build_scenario(42);
     let w = &mut s.world;

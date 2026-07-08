@@ -123,6 +123,8 @@ pub enum EventKind {
 
     ToeTemplateDefined { template: ToeTemplateId },
     FormationAssembled { formation: FormationId, template: ToeTemplateId, assets: Vec<AssetId> },
+    FormationMarchOrdered { formation: FormationId, route: RouteId, arrives_day: u64 },
+    FormationArrived { formation: FormationId, at: LocationId },
 
     /// A real battle resolved between two forces sharing a site (docket:
     /// the ant-life-sim faction war). See `combat::BattleOutcome` for the

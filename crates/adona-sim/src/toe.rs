@@ -49,6 +49,19 @@ pub struct ToeShortage {
     pub missing: u32,
 }
 
+/// Where a formation physically is: stationed at a site (able to fight,
+/// assemble, and receive march orders) or en route along a real route (not
+/// at any site, cannot fight until it arrives — mirrors [`crate::convoys::ConvoyState`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum FormationState {
+    Stationed { at: LocationId },
+    EnRoute {
+        route: RouteId,
+        departed_day: u64,
+        arrives_day: u64,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Formation {
     pub id: FormationId,
@@ -57,9 +70,19 @@ pub struct Formation {
     pub name: String,
     /// The real serial assets filling this formation.
     pub assets: Vec<AssetId>,
-    /// Home/current site. TODO(war): formations that move and fight.
-    pub home: LocationId,
+    pub state: FormationState,
     pub formed_day: u64,
+}
+
+impl Formation {
+    /// The site this formation is currently at, if it is at one (`None`
+    /// while en route — the same "on the road" fog convoys observe).
+    pub fn current_site(&self) -> Option<LocationId> {
+        match self.state {
+            FormationState::Stationed { at } => Some(at),
+            FormationState::EnRoute { .. } => None,
+        }
+    }
 }
 
 impl World {
@@ -153,7 +176,7 @@ impl World {
                 template: template_id,
                 name: name.to_string(),
                 assets: chosen.clone(),
-                home: site,
+                state: FormationState::Stationed { at: site },
                 formed_day,
             },
         );
@@ -175,6 +198,56 @@ impl World {
     pub(crate) fn remove_asset_from_formations(&mut self, asset: AssetId) {
         for formation in self.formations.values_mut() {
             formation.assets.retain(|a| *a != asset);
+        }
+    }
+
+    /// Order a stationed formation to march along a real route. The
+    /// formation must be at the route's origin; it becomes untargetable by
+    /// combat and unable to receive march/assemble orders until it arrives
+    /// (mirrors [`World::depart_convoy`]).
+    pub fn order_formation_march(&mut self, formation: FormationId, route: RouteId) -> Result<(), SimError> {
+        let at = self
+            .formations
+            .get(&formation)
+            .ok_or(SimError::UnknownFormation(formation))?
+            .current_site()
+            .ok_or(SimError::FormationNotAtSite(formation))?;
+        let r = self
+            .routes
+            .get(&route)
+            .ok_or(SimError::UnknownRoute(route))?
+            .clone();
+        if r.from != at {
+            return Err(SimError::NotColocated);
+        }
+        let departed_day = self.clock.day;
+        let arrives_day = departed_day + r.distance_days;
+        self.formations.get_mut(&formation).unwrap().state = FormationState::EnRoute {
+            route,
+            departed_day,
+            arrives_day,
+        };
+        self.push_event(EventKind::FormationMarchOrdered { formation, route, arrives_day });
+        Ok(())
+    }
+
+    /// Advance formations: arrivals fire when the clock reaches the arrival
+    /// day (mirrors [`World::tick_convoys`]).
+    pub(crate) fn tick_formations(&mut self) {
+        let today = self.clock.day;
+        let arriving: Vec<(FormationId, LocationId)> = self
+            .formations
+            .iter()
+            .filter_map(|(id, f)| match f.state {
+                FormationState::EnRoute { route, arrives_day, .. } if arrives_day <= today => {
+                    self.routes.get(&route).map(|r| (*id, r.to))
+                }
+                _ => None,
+            })
+            .collect();
+        for (formation, at) in arriving {
+            self.formations.get_mut(&formation).unwrap().state = FormationState::Stationed { at };
+            self.push_event(EventKind::FormationArrived { formation, at });
         }
     }
 

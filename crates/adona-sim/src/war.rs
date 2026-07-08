@@ -8,10 +8,10 @@
 //! "the factions are fighting among themselves because the simulated world
 //! made them do it."
 //!
-//! TODO(war): formation movement/deployment orders so factions actively
-//! march on contested or enemy territory instead of only clashing where
-//! they already happen to be; pulling damaged formations back to refit;
-//! faction diplomacy (currently every distinct owner is treated as
+//! Formations now march toward contested/enemy territory on their own via
+//! [`World::tick_faction_deployment`] instead of only clashing where they
+//! already happen to be. Still TODO(war): pulling damaged formations back to
+//! refit; faction diplomacy (currently every distinct owner is treated as
 //! hostile — there is no alliance system yet).
 
 use crate::ids::*;
@@ -28,7 +28,7 @@ impl World {
         for site in sites {
             let mut by_owner: BTreeMap<ActorId, Vec<AssetId>> = BTreeMap::new();
             for f in self.formations.values() {
-                if f.home != site {
+                if f.current_site() != Some(site) {
                     continue;
                 }
                 by_owner.entry(f.owner).or_default().extend(f.assets.iter().copied());

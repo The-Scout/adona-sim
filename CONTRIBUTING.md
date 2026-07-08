@@ -34,9 +34,12 @@ how it's being built.
 
 ## Known gaps / good first areas
 
-See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) — in particular, faction formation
-movement/deployment AI and long-run (100+ day) tick verification are open
-and would be genuinely useful contributions.
+See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) — in particular, long-run (100+ day)
+tick verification is open and would be a genuinely useful contribution.
+Formation deployment AI now marches formations onto contested/enemy ground
+automatically, but only as a greedy single-hop rule; multi-hop pathfinding,
+retreat/refit orders, and coordinated multi-formation offensives are all
+still open.
 
 ## License
 
