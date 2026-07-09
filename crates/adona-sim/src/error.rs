@@ -46,6 +46,9 @@ pub enum SimError {
     InvalidQuantity,
     /// Real goods ran out: the offered lots do not cover the requirement.
     InsufficientQuantity { commodity: CommodityId, missing: u64 },
+    /// Real components ran out: not enough loose components matching an
+    /// accepted def were physically on hand to cover a recipe's requirement.
+    InsufficientComponents { accepts: Vec<ComponentDefId>, missing: u32 },
     /// The treasury cannot cover the cost. Money is real too.
     InsufficientFunds { actor: ActorId, needed: i64, available: i64 },
     /// Arithmetic overflow in money or quantity math.
@@ -130,6 +133,9 @@ impl std::fmt::Display for SimError {
             InvalidQuantity => write!(f, "invalid quantity"),
             InsufficientQuantity { commodity, missing } => {
                 write!(f, "insufficient real stock of {commodity}: {missing} short")
+            }
+            InsufficientComponents { accepts, missing } => {
+                write!(f, "insufficient real components matching {accepts:?}: {missing} short")
             }
             InsufficientFunds { actor, needed, available } => {
                 write!(f, "{actor} needs {needed} credits but has {available}")

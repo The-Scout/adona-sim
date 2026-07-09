@@ -94,6 +94,7 @@ fn main() -> Result<(), SimError> {
     let recipe = w.define_recipe(
         "Roll Armor Plate",
         vec![(iron_ore, 8_000)],
+        vec![],
         RecipeOutputs::Commodity { commodity: armor_plate, quantity: 4_000 },
         3,
         Some(tooling_design),
@@ -141,7 +142,7 @@ fn main() -> Result<(), SimError> {
         w.tick();
 
         if job.is_none() {
-            job = w.start_production(factory, recipe, &[ore]).ok();
+            job = w.start_production(factory, recipe, &[ore], &[]).ok();
         }
         if let (Some(j), false) = (job, listed_plate) {
             if let Some(JobState::Completed { output_lots, .. }) =

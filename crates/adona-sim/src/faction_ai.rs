@@ -127,7 +127,7 @@ impl World {
             }
 
             let recipe_id = *recipe_id;
-            if let Ok(job) = self.start_production(factory_id, recipe_id, &offered) {
+            if let Ok(job) = self.start_production(factory_id, recipe_id, &offered, &[]) {
                 self.push_event(EventKind::FactionProcurementStarted { goal: goal.id, job });
                 return true;
             }

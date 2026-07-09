@@ -8,7 +8,7 @@
 
 use crate::actors::Credits;
 use crate::events::EventKind;
-use crate::goods::LotState;
+use crate::goods::{LegalStatus, Lineage, LotOrigin, LotState, QualityGrade};
 use crate::ids::*;
 use crate::world::World;
 use crate::SimError;
@@ -37,6 +37,16 @@ pub enum LocationKind {
 pub enum MineReserves {
     Infinite,
     Finite { remaining: u64 },
+}
+
+/// One independent automatic-production line at a location: a commodity, a
+/// daily quantity, and its own real depletion tracking (separate from the
+/// location's `mine_reserves`, which is a distinct, on-demand-only pool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationYield {
+    pub commodity: CommodityId,
+    pub quantity_per_day: u64,
+    pub reserves: MineReserves,
 }
 
 /// A daily civilian demand line for a city. Cities with population and needs
@@ -72,8 +82,17 @@ pub struct Location {
     /// satisfied. Suppresses population growth above a threshold — the
     /// urgency signal the docket's price-feedback question was asking for.
     pub unrest_pct: u32,
-    /// `Some` only for kind == Mine.
+    /// `Some` only for kind == Mine. Gates `World::produce_from_mine`
+    /// (on-demand extraction), independent of `yields` below.
     pub mine_reserves: Option<MineReserves>,
+    /// Automatic daily production (docket TODO(production): "mines as
+    /// scheduled producers in tick with labor, equipment, and output rates
+    /// instead of on-demand extraction"). A location can hold any number of
+    /// independent yields — e.g. a faction's capital producing several raw
+    /// materials for its own industry at once — each with its own real
+    /// depletion tracking. Not restricted to `LocationKind::Mine`: what a
+    /// site is *labeled* and what it can produce are independent questions.
+    pub yields: Vec<LocationYield>,
     /// The faction currently holding this site, if any. Combat is the only
     /// thing that changes this once set (docket: faction-war territory
     /// control); it starts unclaimed.
@@ -120,12 +139,81 @@ impl World {
                 tax_rate_per_capita: 0,
                 unrest_pct: 0,
                 mine_reserves,
+                yields: Vec::new(),
                 controller: None,
                 controlled_since: 0,
             },
         );
         self.push_event(EventKind::LocationCreated { location: id });
         id
+    }
+
+    /// Add an automatic daily production line to a location (see
+    /// `tick_location_yields`): every day it produces `quantity_per_day` of
+    /// `commodity` for its controller, depleting `reserves` independently of
+    /// any other yield at the same site or the location's own
+    /// `mine_reserves`. Not restricted to `LocationKind::Mine` — a
+    /// location's real productive capacity is data, not implied by its
+    /// label. A location can hold any number of these (e.g. a capital city
+    /// producing several raw materials for its own industry at once).
+    pub fn add_location_yield(
+        &mut self,
+        location: LocationId,
+        commodity: CommodityId,
+        quantity_per_day: u64,
+        reserves: MineReserves,
+    ) -> Result<(), SimError> {
+        if !self.commodities.contains_key(&commodity) {
+            return Err(SimError::UnknownCommodity(commodity));
+        }
+        let loc = self.locations.get_mut(&location).ok_or(SimError::UnknownLocation(location))?;
+        loc.yields.push(LocationYield { commodity, quantity_per_day, reserves });
+        self.push_event(EventKind::AdminEdit {
+            operator: None,
+            description: format!("added a {quantity_per_day}/day yield to {location}"),
+        });
+        Ok(())
+    }
+
+    /// Automatic daily production: every location with a real controller
+    /// and at least one configured yield produces real commodity for that
+    /// controller from each yield line, respecting that line's own `Finite`
+    /// depletion. Unclaimed locations and locations with no configured
+    /// yield produce nothing on their own.
+    pub(crate) fn tick_location_yields(&mut self) {
+        let due: Vec<(LocationId, ActorId, usize, CommodityId, u64)> = self
+            .locations
+            .values()
+            .filter_map(|l| {
+                let controller = l.controller?;
+                Some(l.yields.iter().enumerate().filter_map(move |(i, y)| {
+                    let has_capacity = match y.reserves {
+                        MineReserves::Infinite => true,
+                        MineReserves::Finite { remaining } => remaining >= y.quantity_per_day,
+                    };
+                    has_capacity.then_some((l.id, controller, i, y.commodity, y.quantity_per_day))
+                }))
+            })
+            .flatten()
+            .collect();
+
+        for (location, controller, index, commodity, quantity) in due {
+            let lot = self.create_lot_raw(
+                controller,
+                commodity,
+                quantity,
+                QualityGrade::Standard,
+                LegalStatus::Legitimate,
+                LocationRef::Site(location),
+                Lineage::Root(LotOrigin::Mined { mine: location }),
+            );
+            let Ok(lot) = lot else { continue };
+            if let MineReserves::Finite { remaining } = self.locations[&location].yields[index].reserves {
+                self.locations.get_mut(&location).unwrap().yields[index].reserves =
+                    MineReserves::Finite { remaining: remaining - quantity };
+            }
+            self.push_event(EventKind::MineYield { mine: location, lot, quantity });
+        }
     }
 
     /// Set population, purchasing authority, and daily civilian needs for a

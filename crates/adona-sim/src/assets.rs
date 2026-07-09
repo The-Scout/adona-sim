@@ -117,6 +117,9 @@ pub enum ComponentPlacement {
     FittedFactory(FactoryId),
     /// Loose stock with its own location.
     Loose(LocationRef),
+    /// Consumed as a real recipe input. Record kept for provenance, mirrors
+    /// `LotState::ConsumedByProduction`.
+    Consumed(ProductionJobId),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -382,6 +385,9 @@ impl World {
             ComponentPlacement::Fitted(_) | ComponentPlacement::FittedFactory(_) => {
                 return Err(SimError::InvalidState("component is already fitted".into()))
             }
+            ComponentPlacement::Consumed(_) => {
+                return Err(SimError::InvalidState("component was already consumed by production".into()))
+            }
             ComponentPlacement::Loose(loc) => {
                 if self.resolve_site(loc).is_none()
                     || self.resolve_site(loc) != self.resolve_site(asset_location)
@@ -440,6 +446,9 @@ impl World {
         match comp_placement {
             ComponentPlacement::Fitted(_) | ComponentPlacement::FittedFactory(_) => {
                 return Err(SimError::InvalidState("component is already fitted".into()))
+            }
+            ComponentPlacement::Consumed(_) => {
+                return Err(SimError::InvalidState("component was already consumed by production".into()))
             }
             ComponentPlacement::Loose(loc) => {
                 if self.resolve_site(loc) != Some(f.site) {

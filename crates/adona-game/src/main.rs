@@ -162,15 +162,27 @@ fn formation_tooltip(ui: &mut egui::Ui, w: &World, formation: &Formation) {
         ui.label(format!("doctrine: {}", template.name));
     }
     ui.label(format!("assets: {}", formation.assets.len()));
-    let mut by_design: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    // Break down by design and, within a design, how many were actually
+    // manufactured by the faction's own production chain versus pre-war
+    // stock — real provenance, not a decorative label, and the most direct
+    // way to see the new economy actually producing something in the GUI.
+    let mut by_design: std::collections::BTreeMap<String, (u32, u32)> = std::collections::BTreeMap::new();
     for &asset_id in &formation.assets {
         if let Some(asset) = w.asset(asset_id) {
             let name = w.design(asset.design).map(|d| d.name.clone()).unwrap_or_else(|| "unknown design".into());
-            *by_design.entry(name).or_insert(0) += 1;
+            let entry = by_design.entry(name).or_insert((0, 0));
+            entry.0 += 1;
+            if matches!(asset.origin, adona_sim::assets::AssetOrigin::Manufactured { .. }) {
+                entry.1 += 1;
+            }
         }
     }
-    for (name, count) in by_design {
-        ui.label(format!("  {count}x {name}"));
+    for (name, (count, manufactured)) in by_design {
+        if manufactured > 0 {
+            ui.label(format!("  {count}x {name} ({manufactured} manufactured)"));
+        } else {
+            ui.label(format!("  {count}x {name}"));
+        }
     }
     match formation.state {
         FormationState::Stationed { .. } => {

@@ -113,10 +113,10 @@ impl World {
 
     /// Advance one strategic day, in fixed deterministic phase order:
     /// sub-day quarter events (contact/interception windows), production
-    /// completions, convoy movement, formation movement, procedural mine
-    /// discovery, civilian demand, faction planning, faction deployment
-    /// (marching on contested/enemy ground), faction war, market matching,
-    /// population.
+    /// completions, automatic mine yield, automatic factory production,
+    /// convoy movement, formation movement, procedural mine discovery,
+    /// civilian demand, faction planning, faction deployment (marching on
+    /// contested/enemy ground), faction war, market matching, population.
     pub fn tick(&mut self) {
         self.clock.advance_day();
         let day = self.clock.day;
@@ -126,6 +126,8 @@ impl World {
             self.tick_quarter_convoy_contacts();
         }
         self.tick_production();
+        self.tick_location_yields();
+        self.tick_factory_auto_production();
         self.tick_convoys();
         self.tick_formations();
         self.tick_mine_discovery();
@@ -270,6 +272,15 @@ impl World {
     pub fn formations_iter(&self) -> impl Iterator<Item = &Formation> {
         self.formations.values()
     }
+    pub fn factories_iter(&self) -> impl Iterator<Item = &Factory> {
+        self.factories.values()
+    }
+    pub fn components_iter(&self) -> impl Iterator<Item = &ComponentInstance> {
+        self.components.values()
+    }
+    pub fn production_jobs_iter(&self) -> impl Iterator<Item = &ProductionJob> {
+        self.production_jobs.values()
+    }
     pub fn routes_iter(&self) -> impl Iterator<Item = &Route> {
         self.routes.values()
     }
@@ -391,6 +402,11 @@ impl World {
                 ComponentPlacement::Loose(loc) => {
                     if !self.location_ref_valid(*loc) {
                         v.push(format!("{id} has a dangling loose location"));
+                    }
+                }
+                ComponentPlacement::Consumed(job) => {
+                    if !self.production_jobs.contains_key(job) {
+                        v.push(format!("{id} consumed by nonexistent {job}"));
                     }
                 }
             }

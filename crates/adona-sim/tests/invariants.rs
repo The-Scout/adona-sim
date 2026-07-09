@@ -4,7 +4,7 @@
 //! escrowed money, TO&E from real assets, immutable intel, and determinism.
 
 use adona_sim::actors::ActorKind;
-use adona_sim::assets::{AssetKind, AssetOrigin, ComponentCategory, ComponentSlot};
+use adona_sim::assets::{AssetKind, AssetOrigin, ComponentCategory, ComponentPlacement, ComponentSlot};
 use adona_sim::contracts::{ContractObjective, ContractState, ContractTarget, SalvageTerms};
 use adona_sim::convoys::ConvoyState;
 use adona_sim::goods::{LegalStatus, LotOrigin, LotState, QualityGrade, UnitOfMeasure};
@@ -12,7 +12,7 @@ use adona_sim::ids::*;
 use adona_sim::intel::IntelSubject;
 use adona_sim::locations::{CivilianNeed, LocationKind, LocationRef};
 use adona_sim::markets::OrderScope;
-use adona_sim::production::{JobState, RecipeOutputs};
+use adona_sim::production::{ComponentRequirement, JobState, RecipeOutputs};
 use adona_sim::storage::{InMemoryStore, SimStore};
 use adona_sim::toe::ToeSlot;
 use adona_sim::{SimError, World};
@@ -169,11 +169,12 @@ fn build_scenario(seed: u64) -> Scenario {
     let recipe = w.define_recipe(
         "Roll Armor Plate",
         vec![(iron_ore, 8_000)],
+        vec![],
         RecipeOutputs::Commodity { commodity: armor_plate, quantity: 4_000 },
         3,
         Some(tooling_design),
     );
-    let job = w.start_production(factory, recipe, &[ore_lot]).unwrap();
+    let job = w.start_production(factory, recipe, &[ore_lot], &[]).unwrap();
     w.tick();
     w.tick();
     w.tick(); // completes on day 5
@@ -548,11 +549,12 @@ fn production_fails_without_sufficient_real_inputs() {
     let recipe = w.define_recipe(
         "Roll Armor Plate (again)",
         vec![(s.iron_ore, 8_000)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 4_000 },
         3,
         None,
     );
-    match w.start_production(s.factory, recipe, &[small_ore]) {
+    match w.start_production(s.factory, recipe, &[small_ore], &[]) {
         Err(SimError::InsufficientQuantity { missing, .. }) => assert_eq!(missing, 7_900),
         other => panic!("production ran without real inputs: {other:?}"),
     }
@@ -572,6 +574,7 @@ fn tooling_binds_production_to_exact_designs() {
     let recipe = w.define_recipe(
         "Mill Autocannon Barrels",
         vec![(s.iron_ore, 100)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 10 },
         1,
         Some(other_tooling_design),
@@ -582,7 +585,7 @@ fn tooling_binds_production_to_exact_designs() {
     w.admin_move_lot(ore, LocationRef::Site(s.forge), None).unwrap();
     // The factory has Armor Plate Line tooling, not Autocannon Line.
     assert_eq!(
-        w.start_production(s.factory, recipe, &[ore]),
+        w.start_production(s.factory, recipe, &[ore], &[]),
         Err(SimError::ToolingMismatch { factory: s.factory })
     );
 }
@@ -1344,6 +1347,7 @@ fn faction_ai_produces_toward_a_real_toe_shortage_when_it_can() {
     w.define_recipe(
         "Assemble Talon",
         vec![(s.iron_ore, 100)],
+        vec![],
         RecipeOutputs::SerialAssets { design: s.talon_design, count: 1 },
         1,
         Some(mech_tooling_design),
@@ -1401,6 +1405,7 @@ fn faction_ai_orders_missing_inputs_when_it_cannot_produce_yet() {
     w.define_recipe(
         "Assemble Talon",
         vec![(s.iron_ore, 100)],
+        vec![],
         RecipeOutputs::SerialAssets { design: s.talon_design, count: 1 },
         1,
         Some(mech_tooling_design),
@@ -1670,6 +1675,7 @@ fn factories_cannot_produce_until_all_five_sub_systems_are_fitted() {
     let recipe = w.define_recipe(
         "Roll Armor Plate (bare factory)",
         vec![(s.iron_ore, 10)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 5 },
         1,
         None,
@@ -1677,7 +1683,7 @@ fn factories_cannot_produce_until_all_five_sub_systems_are_fitted() {
     let ore = w.produce_from_mine(s.redrock_mine, s.karth, s.iron_ore, 10, QualityGrade::Standard).unwrap();
     w.admin_move_lot(ore, LocationRef::Site(s.forge), None).unwrap();
 
-    match w.start_production(bare_factory, recipe, &[ore]) {
+    match w.start_production(bare_factory, recipe, &[ore], &[]) {
         Err(SimError::FactoryIncomplete { factory, missing }) => {
             assert_eq!(factory, bare_factory);
             assert_eq!(missing.len(), 5);
@@ -1689,7 +1695,7 @@ fn factories_cannot_produce_until_all_five_sub_systems_are_fitted() {
     // identical recipe runs there without a FactoryIncomplete error.
     let ore2 = w.produce_from_mine(s.redrock_mine, s.karth, s.iron_ore, 10, QualityGrade::Standard).unwrap();
     w.admin_move_lot(ore2, LocationRef::Site(s.forge), None).unwrap();
-    assert!(w.start_production(s.factory, recipe, &[ore2]).is_ok());
+    assert!(w.start_production(s.factory, recipe, &[ore2], &[]).is_ok());
 }
 
 #[test]
@@ -1717,13 +1723,14 @@ fn retooling_burns_real_money_and_imposes_downtime() {
     let recipe = w.define_recipe(
         "Roll Armor Plate (post-retool)",
         vec![(s.iron_ore, 10)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 5 },
         1,
         None,
     );
     let ore = w.produce_from_mine(s.redrock_mine, s.karth, s.iron_ore, 10, QualityGrade::Standard).unwrap();
     w.admin_move_lot(ore, LocationRef::Site(s.forge), None).unwrap();
-    assert!(matches!(w.start_production(s.factory, recipe, &[ore]), Err(SimError::InvalidState(_))));
+    assert!(matches!(w.start_production(s.factory, recipe, &[ore], &[]), Err(SimError::InvalidState(_))));
 
     assert!(w.check_invariants().is_empty(), "burned retool money violated conservation");
 }
@@ -1912,5 +1919,208 @@ fn mines_are_discovered_procedurally_and_are_reachable() {
 
     let reachable = w.routes_iter().any(|r| r.from == mine) && w.routes_iter().any(|r| r.to == mine);
     assert!(reachable, "a discovered mine must have routes connecting it to the existing map both ways");
+    assert!(w.check_invariants().is_empty());
+}
+
+/// The tiered material chain generator must be genuinely generic: an
+/// invented material with an invented, non-13 tier count must work exactly
+/// like any ADONA content would, proving it isn't secretly coupled to
+/// ADONA's specific 5-materials/13-tiers content.
+#[test]
+fn generate_tiered_material_chain_is_generic_not_adona_specific() {
+    use adona_sim::content::TieredChainSpec;
+
+    let mut w = World::new(1);
+    let spec = TieredChainSpec {
+        material_name: "Zorblax".into(),
+        tier_names: vec!["Crude".into(), "Refined".into(), "Pure".into()],
+        unit: UnitOfMeasure::Kilograms,
+        base_price: 5,
+        component_category: ComponentCategory::MechOrEquipment,
+        refine_input_qty: 10,
+        refine_output_qty: 8,
+        refine_duration_days: 1,
+        convert_input_qty: 4,
+        convert_duration_days: 1,
+    };
+    let handles = w.generate_tiered_material_chain(&spec);
+
+    assert_eq!(handles.commodities.len(), 3);
+    assert_eq!(handles.component_defs.len(), 3);
+    assert_eq!(handles.convert_recipes.len(), 3);
+    assert_eq!(handles.refine_recipes.len(), 2, "N tiers must produce N-1 refining steps");
+
+    for (i, &commodity) in handles.commodities.iter().enumerate() {
+        let def = w.commodity(commodity).unwrap();
+        assert_eq!(def.tier, (i + 1) as u8);
+        assert!(def.name.contains("Zorblax"), "generated commodity name must use the caller's material name");
+    }
+    for (i, &def_id) in handles.component_defs.iter().enumerate() {
+        let def = w.component_def(def_id).unwrap();
+        assert_eq!(def.tier, (i + 1) as u8);
+    }
+    let requirement = handles.any_tier_requirement(2);
+    assert_eq!(requirement.count, 2);
+    assert_eq!(requirement.accepts, handles.component_defs);
+    assert!(w.check_invariants().is_empty());
+}
+
+/// A recipe with real component inputs must consume real loose components
+/// (never a fake input) and fail cleanly, consuming nothing, when short.
+#[test]
+fn recipe_component_inputs_consume_real_components_and_fail_cleanly_when_short() {
+    let mut s = build_scenario(42);
+    let w = &mut s.world;
+
+    let input_def = w.define_component_def("Test Input Part", 1, ComponentCategory::MechOrEquipment);
+    let output_def = w.define_component_def("Test Output Part", 2, ComponentCategory::MechOrEquipment);
+    let recipe = w.define_recipe(
+        "Assemble Test Output Part",
+        vec![],
+        vec![ComponentRequirement { accepts: vec![input_def], count: 2 }],
+        RecipeOutputs::Components { def: output_def, count: 1 },
+        1,
+        None,
+    );
+
+    let c1 = w
+        .seed_component(s.karth, input_def, s.forge, QualityGrade::Standard, AssetOrigin::SeededHistorical { note: "part".into() })
+        .unwrap();
+    match w.start_production(s.factory, recipe, &[], &[c1]) {
+        Err(SimError::InsufficientComponents { missing, .. }) => assert_eq!(missing, 1),
+        other => panic!("started production without enough real components: {other:?}"),
+    }
+    assert_eq!(w.component(c1).unwrap().placement, ComponentPlacement::Loose(LocationRef::Site(s.forge)));
+
+    let c2 = w
+        .seed_component(s.karth, input_def, s.forge, QualityGrade::Standard, AssetOrigin::SeededHistorical { note: "part".into() })
+        .unwrap();
+    let job = w.start_production(s.factory, recipe, &[], &[c1, c2]).unwrap();
+    assert_eq!(w.component(c1).unwrap().placement, ComponentPlacement::Consumed(job));
+    assert_eq!(w.component(c2).unwrap().placement, ComponentPlacement::Consumed(job));
+    assert!(w.check_invariants().is_empty());
+}
+
+/// Locations with a configured yield produce real commodity for their
+/// controller automatically every day, with no manual `produce_from_mine`
+/// call, and still respect `Finite` depletion of that specific yield line.
+#[test]
+fn tick_location_yields_produce_automatically_for_the_controller() {
+    let mut w = World::new(5);
+    let karth = w.create_actor("Karth", ActorKind::Faction, 0);
+    let mine = w.create_location("Test Mine", LocationKind::Mine, (0, 0));
+    let ore = w.define_commodity("Test Ore", UnitOfMeasure::Kilograms, 1, 1);
+    w.set_territory_controller(mine, Some(karth)).unwrap();
+    w.add_location_yield(mine, ore, 20, adona_sim::locations::MineReserves::Finite { remaining: 25 }).unwrap();
+
+    w.tick();
+    let total: u64 = w.lots_iter().filter(|l| l.commodity == ore && l.owner == karth).map(|l| l.quantity).sum();
+    assert_eq!(total, 20, "location must auto-yield without any manual produce_from_mine call");
+
+    w.tick();
+    let total_after_depletion: u64 = w.lots_iter().filter(|l| l.commodity == ore && l.owner == karth).map(|l| l.quantity).sum();
+    assert_eq!(total_after_depletion, 20, "a depleted yield must not produce more than its remaining reserve");
+    assert!(w.check_invariants().is_empty());
+}
+
+/// The generic auto-production tick starts whatever runnable recipe an idle
+/// operational factory can, preferring the highest-tier runnable untooled
+/// recipe when nothing tooled is ready.
+#[test]
+fn tick_factory_auto_production_prefers_highest_tier_runnable_recipe() {
+    let mut s = build_scenario(42);
+    let w = &mut s.world;
+
+    let low_in = w.define_commodity("Low Grade Ore", UnitOfMeasure::Kilograms, 1, 1);
+    let low_out = w.define_commodity("Low Grade Plate", UnitOfMeasure::Kilograms, 2, 1);
+    let high_in = w.define_commodity("High Grade Ore", UnitOfMeasure::Kilograms, 8, 1);
+    let high_out = w.define_commodity("High Grade Plate", UnitOfMeasure::Kilograms, 9, 1);
+    let recipe_low =
+        w.define_recipe("Low Refine", vec![(low_in, 10)], vec![], RecipeOutputs::Commodity { commodity: low_out, quantity: 5 }, 1, None);
+    let recipe_high = w.define_recipe(
+        "High Refine",
+        vec![(high_in, 10)],
+        vec![],
+        RecipeOutputs::Commodity { commodity: high_out, quantity: 5 },
+        1,
+        None,
+    );
+
+    w.seed_lot(s.karth, low_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "ore".into() })
+        .unwrap();
+    w.seed_lot(s.karth, high_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "ore".into() })
+        .unwrap();
+
+    let before = w.events().len();
+    w.tick();
+    let started: Vec<RecipeId> = w.events()[before..]
+        .iter()
+        .filter_map(|e| match &e.kind {
+            adona_sim::events::EventKind::ProductionStarted { recipe, .. } => Some(*recipe),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![recipe_high], "an idle factory must prefer the highest-tier runnable recipe");
+    assert_ne!(started.first(), Some(&recipe_low));
+    assert!(w.check_invariants().is_empty());
+}
+
+/// A factory tooled for a specific recipe prefers running it over any
+/// higher-tier untooled recipe that also happens to be runnable — the bound
+/// job is the deliberate one.
+#[test]
+fn tick_factory_auto_production_prefers_tooled_recipe_over_higher_tier_untooled() {
+    let mut s = build_scenario(42);
+    let w = &mut s.world;
+
+    let tooling_design = w.define_design("Bespoke Line", AssetKind::FactoryTooling, vec![], None, None).unwrap();
+    let tooling = w
+        .seed_asset(
+            s.karth,
+            tooling_design,
+            s.forge,
+            QualityGrade::Standard,
+            AssetOrigin::SeededHistorical { note: "line".into() },
+            None,
+        )
+        .unwrap();
+    w.install_tooling(s.factory, tooling, 0, 0).unwrap();
+
+    let bespoke_in = w.define_commodity("Bespoke Input", UnitOfMeasure::Kilograms, 1, 1);
+    let bespoke_out = w.define_commodity("Bespoke Output", UnitOfMeasure::Kilograms, 3, 1);
+    let recipe_tooled = w.define_recipe(
+        "Bespoke Run",
+        vec![(bespoke_in, 10)],
+        vec![],
+        RecipeOutputs::Commodity { commodity: bespoke_out, quantity: 5 },
+        1,
+        Some(tooling_design),
+    );
+    let untooled_in = w.define_commodity("Untooled Input", UnitOfMeasure::Kilograms, 12, 1);
+    let untooled_out = w.define_commodity("Untooled Output", UnitOfMeasure::Kilograms, 13, 1);
+    let _recipe_untooled_high_tier = w.define_recipe(
+        "Untooled High-Tier Run",
+        vec![(untooled_in, 10)],
+        vec![],
+        RecipeOutputs::Commodity { commodity: untooled_out, quantity: 5 },
+        1,
+        None,
+    );
+
+    w.seed_lot(s.karth, bespoke_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "in".into() })
+        .unwrap();
+    w.seed_lot(s.karth, untooled_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "in".into() })
+        .unwrap();
+
+    let before = w.events().len();
+    w.tick();
+    let started: Vec<RecipeId> = w.events()[before..]
+        .iter()
+        .filter_map(|e| match &e.kind {
+            adona_sim::events::EventKind::ProductionStarted { recipe, .. } => Some(*recipe),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![recipe_tooled], "a tooled-and-ready recipe must win even over a higher-tier untooled one");
     assert!(w.check_invariants().is_empty());
 }
