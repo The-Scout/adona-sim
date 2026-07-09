@@ -13,6 +13,7 @@ use crate::ids::*;
 use crate::world::World;
 use crate::SimError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocationKind {
@@ -210,7 +211,7 @@ impl World {
             let Ok(lot) = lot else { continue };
             if let MineReserves::Finite { remaining } = self.locations[&location].yields[index].reserves {
                 self.locations.get_mut(&location).unwrap().yields[index].reserves =
-                    MineReserves::Finite { remaining: remaining - quantity };
+                    MineReserves::Finite { remaining: remaining.saturating_sub(quantity) };
             }
             self.push_event(EventKind::MineYield { mine: location, lot, quantity });
         }
@@ -267,6 +268,18 @@ impl World {
             .map(|(id, _)| *id)
             .collect();
 
+        // Built once for this whole tick, instead of rescanning every lot
+        // in the world for every civilian need at every city.
+        let mut lots_by_owner_site_commodity: BTreeMap<(ActorId, LocationId, CommodityId), Vec<LotId>> = BTreeMap::new();
+        for (lid, lot) in &self.lots {
+            if lot.state != LotState::Active {
+                continue;
+            }
+            if let Some(site) = self.resolve_site(lot.location) {
+                lots_by_owner_site_commodity.entry((lot.owner, site, lot.commodity)).or_default().push(*lid);
+            }
+        }
+
         for city in cities {
             let (authority, needs, population, tax_rate, unrest) = {
                 let l = &self.locations[&city];
@@ -277,17 +290,10 @@ impl World {
             if let Some(authority) = authority {
                 for need in &needs {
                     let mut remaining = need.quantity_per_day;
-                    let candidate_lots: Vec<LotId> = self
-                        .lots
-                        .iter()
-                        .filter(|(_, l)| {
-                            l.owner == authority
-                                && l.commodity == need.commodity
-                                && l.state == LotState::Active
-                                && self.resolve_site(l.location) == Some(city)
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
+                    let candidate_lots = lots_by_owner_site_commodity
+                        .get(&(authority, city, need.commodity))
+                        .cloned()
+                        .unwrap_or_default();
                     for lid in candidate_lots {
                         if remaining == 0 {
                             break;

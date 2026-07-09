@@ -298,9 +298,15 @@ pub fn build_world(seed: &WorldSeedFile) -> Result<World, String> {
             .map_err(|e| format!("faction {:?} assembly tooling: {e}", f.key))?;
         let _ = assembly_recipe; // available to every faction's factories generically via tick_factory_auto_production
 
-        // TO&E: a standing goal plus a small starting garrison so there's
-        // something to watch immediately, in addition to the real
-        // production chain now running for replenishment.
+        // TO&E: a standing goal against the combined template (so
+        // production replenishes toward the faction's full desired
+        // strength), but one *separate* starting formation per role rather
+        // than one formation combining everything. A single combined
+        // formation gives the deployment AI's "always keep one garrison
+        // behind" rule (see `tick_faction_deployment` in
+        // `crates/adona-sim/src/faction_ai.rs`) nothing to ever send
+        // anywhere — every faction would sit at home forever, never
+        // marching and never fighting.
         let mut toe_slots = Vec::with_capacity(f.toe.len());
         for slot in &f.toe {
             let design = *designs
@@ -323,10 +329,16 @@ pub fn build_world(seed: &WorldSeedFile) -> Result<World, String> {
                 )
                 .map_err(|e| format!("faction {:?}: seeding {:?}: {e}", f.key, slot.design_key))?;
             }
+
+            let role_template = w.define_toe_template(
+                &format!("{} {} Squad", f.name, slot.role),
+                &f.doctrine,
+                vec![ToeSlot { role: slot.role.clone(), design, count: slot.count }],
+            );
+            w.try_assemble_formation(owner, role_template, &format!("{} {}", f.name, slot.role), home)
+                .map_err(|e| format!("faction {:?}: assembling {:?}: {e:?}", f.key, slot.role))?;
         }
 
-        w.try_assemble_formation(owner, template, &format!("{} Garrison", f.name), home)
-            .map_err(|e| format!("faction {:?}: assembling garrison: {e:?}", f.key))?;
         w.set_faction_goal(owner, template, home).map_err(|e| format!("faction {:?}: {e}", f.key))?;
     }
 
@@ -402,11 +414,20 @@ mod tests {
         for f in &file.factions {
             let owner = w.actors_iter().find(|a| a.name == f.name).map(|a| a.id).expect("faction actor must exist");
 
-            let formation = w
-                .formations_iter()
-                .find(|form| form.owner == owner)
-                .unwrap_or_else(|| panic!("faction {:?} has no assembled formation", f.key));
-            assert!(!formation.assets.is_empty(), "faction {:?} garrison has no real assets", f.key);
+            // One formation per TO&E role, never one combined formation —
+            // a single combined formation leaves the deployment AI's
+            // "always keep one garrison behind" rule nothing to ever send
+            // out (see CLAUDE.md and crates/adona-sim/src/faction_ai.rs).
+            let faction_formations: Vec<_> = w.formations_iter().filter(|form| form.owner == owner).collect();
+            assert_eq!(
+                faction_formations.len(),
+                f.toe.len(),
+                "faction {:?} must start with one formation per TO&E role, not one combined formation",
+                f.key
+            );
+            for formation in &faction_formations {
+                assert!(!formation.assets.is_empty(), "faction {:?} formation {:?} has no real assets", f.key, formation.id);
+            }
 
             let home = w.locations_iter().find(|l| l.name == homes_by_key(&file, &f.home_location_key)).unwrap();
             assert_eq!(home.controller, Some(owner), "faction {:?} does not control its own home site", f.key);
@@ -452,6 +473,39 @@ mod tests {
             .assets_iter()
             .any(|a| matches!(a.origin, adona_sim::assets::AssetOrigin::Manufactured { .. }));
         assert!(manufactured, "no faction manufactured a real asset from its own economy within 400 days");
+        assert!(w.check_invariants().is_empty());
+    }
+
+    /// Regression test for the reported bug: garrisons must actually march
+    /// off their home site and fight, not sit forever. Splitting the
+    /// starting assembly into one formation per TO&E role (rather than one
+    /// combined formation) is what gives the deployment AI's "keep one
+    /// garrison behind" rule real surplus to send toward the contested
+    /// Cradle of Conflict.
+    #[test]
+    fn seeded_factions_eventually_march_and_fight_each_other() {
+        let file = load_real_seed();
+        let mut w = build_world(&file).expect("world_seed.json must build a valid World");
+
+        let mut marched = false;
+        let mut fought = false;
+        for _ in 0..120 {
+            let before = w.events().len();
+            w.tick();
+            for e in &w.events()[before..] {
+                match &e.kind {
+                    adona_sim::events::EventKind::FormationMarchOrdered { .. } => marched = true,
+                    adona_sim::events::EventKind::BattleResolved { .. } => fought = true,
+                    _ => {}
+                }
+            }
+            if marched && fought {
+                break;
+            }
+        }
+
+        assert!(marched, "no formation ever marched off its home site within 120 days");
+        assert!(fought, "no battle was ever resolved within 120 days");
         assert!(w.check_invariants().is_empty());
     }
 

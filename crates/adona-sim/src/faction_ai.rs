@@ -69,22 +69,75 @@ impl World {
     /// docket's `ToeShortage` demand signal was always meant to feed.
     pub(crate) fn tick_faction_ai(&mut self) {
         let goals: Vec<FactionGoal> = self.faction_goals.values().cloned().collect();
+
+        // Built once per tick and reused across every goal/shortage this
+        // tick, instead of rescanning all lots/buy-orders once per
+        // candidate factory or per shortage — that used to scale as
+        // O(goals x shortages x total_lots) every single day.
+        let mut lots_by_owner_site_commodity: BTreeMap<(ActorId, LocationId, CommodityId), Vec<(LotId, u64)>> =
+            BTreeMap::new();
+        let mut owned_by_owner_commodity: BTreeMap<(ActorId, CommodityId), u64> = BTreeMap::new();
+        for (lid, lot) in &self.lots {
+            if lot.state != LotState::Active {
+                continue;
+            }
+            *owned_by_owner_commodity.entry((lot.owner, lot.commodity)).or_insert(0) += lot.quantity;
+            if let Some(site) = self.resolve_site(lot.location) {
+                lots_by_owner_site_commodity.entry((lot.owner, site, lot.commodity)).or_default().push((*lid, lot.quantity));
+            }
+        }
+        let mut global_orders_by_owner_commodity: std::collections::BTreeSet<(ActorId, CommodityId)> =
+            std::collections::BTreeSet::new();
+        for o in self.buy_orders.values() {
+            if o.scope == OrderScope::Global {
+                global_orders_by_owner_commodity.insert((o.buyer, o.commodity));
+            }
+        }
+
         for goal in goals {
             let Ok(shortages) = self.toe_shortages(goal.owner, goal.template, goal.site) else {
                 continue;
             };
             for shortage in shortages {
-                if self.try_produce_toward_shortage(&goal, shortage.design) {
+                if self.try_produce_toward_shortage(&goal, shortage.design, &lots_by_owner_site_commodity) {
                     continue;
                 }
-                self.order_inputs_toward_shortage(&goal, shortage.design);
+                self.order_inputs_toward_shortage(
+                    &goal,
+                    shortage.design,
+                    &owned_by_owner_commodity,
+                    &global_orders_by_owner_commodity,
+                );
             }
+        }
+    }
+
+    /// Reinforcement phase: try to assemble one additional formation per
+    /// standing TO&E goal from whatever real, unassigned assets already
+    /// exist at the goal's site. Production only ever creates loose assets
+    /// (`tick_factory_auto_production`); without this, manufactured
+    /// replacements would sit at home forever instead of ever joining a
+    /// formation that can march or fight. `try_assemble_formation` only
+    /// succeeds when there are enough real free assets to fill the whole
+    /// template, so this is a cheap no-op most ticks — not a planner, just
+    /// a standing "assemble what you can, whenever you can."
+    pub(crate) fn tick_faction_reinforcement(&mut self) {
+        let goals: Vec<FactionGoal> = self.faction_goals.values().cloned().collect();
+        let today = self.clock.day;
+        for goal in goals {
+            let name = format!("Reinforcement Company (day {today})");
+            let _ = self.try_assemble_formation(goal.owner, goal.template, &name, goal.site);
         }
     }
 
     /// Attempt (1): a real, already-tooled, already-stocked factory can run
     /// the recipe right now. Returns true if a job was started.
-    fn try_produce_toward_shortage(&mut self, goal: &FactionGoal, design: DesignId) -> bool {
+    fn try_produce_toward_shortage(
+        &mut self,
+        goal: &FactionGoal,
+        design: DesignId,
+        lots_by_owner_site_commodity: &BTreeMap<(ActorId, LocationId, CommodityId), Vec<(LotId, u64)>>,
+    ) -> bool {
         let candidate_factories: Vec<FactoryId> = self
             .factories
             .iter()
@@ -104,22 +157,16 @@ impl World {
                 continue;
             };
 
-            // Gather real, active, owner-held lots at the factory's site
-            // that could cover the recipe's inputs.
+            // Real, active, owner-held lots at the factory's site that
+            // could cover the recipe's inputs — read from the snapshot
+            // built once for this whole tick, not rescanned per factory.
             let mut offered: Vec<LotId> = Vec::new();
             let mut covered: BTreeMap<CommodityId, u64> = BTreeMap::new();
-            for (lid, lot) in &self.lots {
-                if lot.owner != goal.owner || lot.state != LotState::Active {
-                    continue;
+            for (commodity, _) in &recipe.inputs {
+                if let Some(matching) = lots_by_owner_site_commodity.get(&(goal.owner, factory_site, *commodity)) {
+                    covered.insert(*commodity, matching.iter().map(|(_, qty)| qty).sum());
+                    offered.extend(matching.iter().map(|(lid, _)| *lid));
                 }
-                if self.resolve_site(lot.location) != Some(factory_site) {
-                    continue;
-                }
-                if !recipe.inputs.iter().any(|(c, _)| *c == lot.commodity) {
-                    continue;
-                }
-                *covered.entry(lot.commodity).or_insert(0) += lot.quantity;
-                offered.push(*lid);
             }
             let has_enough = recipe.inputs.iter().all(|(c, qty)| covered.get(c).copied().unwrap_or(0) >= *qty);
             if !has_enough {
@@ -139,7 +186,13 @@ impl World {
     /// whatever recipe inputs are short, so a future tick can produce.
     /// Skips commodities the faction already has an open global order for,
     /// mirroring civilian demand's one-order-at-a-time discipline.
-    fn order_inputs_toward_shortage(&mut self, goal: &FactionGoal, design: DesignId) {
+    fn order_inputs_toward_shortage(
+        &mut self,
+        goal: &FactionGoal,
+        design: DesignId,
+        owned_by_owner_commodity: &BTreeMap<(ActorId, CommodityId), u64>,
+        global_orders_by_owner_commodity: &std::collections::BTreeSet<(ActorId, CommodityId)>,
+    ) {
         let Some((_, recipe)) = self
             .recipes
             .iter()
@@ -150,25 +203,17 @@ impl World {
         };
 
         for (commodity, required_qty) in recipe.inputs.clone() {
-            let owned: u64 = self
-                .lots
-                .values()
-                .filter(|l| l.owner == goal.owner && l.commodity == commodity && l.state == LotState::Active)
-                .map(|l| l.quantity)
-                .sum();
+            let owned = owned_by_owner_commodity.get(&(goal.owner, commodity)).copied().unwrap_or(0);
             if owned >= required_qty {
                 continue;
             }
-            let already_ordering = self.buy_orders.values().any(|o| {
-                o.buyer == goal.owner && o.commodity == commodity && o.scope == OrderScope::Global
-            });
-            if already_ordering {
+            if global_orders_by_owner_commodity.contains(&(goal.owner, commodity)) {
                 continue;
             }
             let Some(def) = self.commodities.get(&commodity) else { continue };
             let reference = self.price_index_anywhere(commodity).unwrap_or(def.base_price);
             let limit: Credits = reference.saturating_mul(115) / 100;
-            let missing = required_qty - owned;
+            let missing = required_qty.saturating_sub(owned);
             if let Ok(order) = self.place_buy_order(goal.owner, OrderScope::Global, commodity, missing, limit) {
                 self.push_event(EventKind::FactionProcurementOrdered { goal: goal.id, order, commodity });
             }

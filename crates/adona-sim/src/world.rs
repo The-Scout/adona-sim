@@ -115,7 +115,8 @@ impl World {
     /// sub-day quarter events (contact/interception windows), production
     /// completions, automatic mine yield, automatic factory production,
     /// convoy movement, formation movement, procedural mine discovery,
-    /// civilian demand, faction planning, faction deployment (marching on
+    /// civilian demand, faction planning, faction reinforcement (assembling
+    /// surplus assets into new formations), faction deployment (marching on
     /// contested/enemy ground), faction war, market matching, population.
     pub fn tick(&mut self) {
         self.clock.advance_day();
@@ -133,6 +134,7 @@ impl World {
         self.tick_mine_discovery();
         self.tick_civilian_demand();
         self.tick_faction_ai();
+        self.tick_faction_reinforcement();
         self.tick_faction_deployment();
         self.tick_faction_war();
         self.tick_market_matching();

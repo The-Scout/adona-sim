@@ -26,15 +26,16 @@ impl World {
     /// standoff actually resolves in one tick instead of leaving everyone
     /// past the first two idle next to a live enemy.
     pub(crate) fn tick_faction_war(&mut self) {
-        let sites: Vec<LocationId> = self.locations.keys().copied().collect();
-        for site in sites {
-            let mut by_owner: BTreeMap<ActorId, Vec<AssetId>> = BTreeMap::new();
-            for f in self.formations.values() {
-                if f.current_site() != Some(site) {
-                    continue;
-                }
-                by_owner.entry(f.owner).or_default().extend(f.assets.iter().copied());
-            }
+        // Index every stationed formation by site in a single pass, rather
+        // than rescanning all formations once per site — this used to be
+        // O(sites x formations) every tick; building the index once is
+        // O(formations), and sites with nobody on them cost nothing at all.
+        let mut by_site: BTreeMap<LocationId, BTreeMap<ActorId, Vec<AssetId>>> = BTreeMap::new();
+        for f in self.formations.values() {
+            let Some(site) = f.current_site() else { continue };
+            by_site.entry(site).or_default().entry(f.owner).or_default().extend(f.assets.iter().copied());
+        }
+        for (site, mut by_owner) in by_site {
             // Only units that are still combat-capable (condition > 0) can
             // fight; wrecks from an earlier battle this tick don't refight.
             for assets in by_owner.values_mut() {

@@ -265,7 +265,7 @@ impl World {
         {
             self.locations.get_mut(&mine).unwrap().mine_reserves =
                 Some(MineReserves::Finite {
-                    remaining: remaining - quantity,
+                    remaining: remaining.saturating_sub(quantity),
                 });
         }
         self.push_event(EventKind::MineYield {

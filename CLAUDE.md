@@ -63,6 +63,41 @@ in `assets/world_seed.json`, supplying Adona's actual 5 materials and its
 would ship a different JSON and a different tier count through the exact
 same function.
 
+## Hardening: validate values, avoid unnecessary writes
+
+This runs on a real machine against a real SSD, and `crates/adona-sim`'s
+event log and lot/component history are append-only by design (provenance is
+never deleted — see `world.rs`'s module docs). Both facts mean the same
+discipline applies to every new tick phase, storage adapter, or content
+generator:
+
+- **All arithmetic on accumulated quantities (money, stock, percentages, day
+  counts, tiers) must be validated against overflow/underflow.** Use
+  `checked_*`/`saturating_*`, or an explicit bounds check immediately before
+  the operation in the same scope (not "checked earlier in a different
+  function and trusted to still hold"). Raw `-`/`+`/`*` on `u64`/`i64`
+  derived from world state is a bug waiting for the one input path that
+  doesn't go through the guard. `crates/adona-sim/src/combat.rs` and
+  `crates/adona-sim/src/actors.rs` are the reference examples to match.
+- **Never write a zero-effect record.** Don't create a zero-quantity lot,
+  push an event for something that didn't actually change, or start a
+  production job whose output is empty — every write should correspond to a
+  real state change, both because fake writes violate the "everything
+  important is real" axiom and because this is genuinely disk I/O once
+  persistence (`storage.rs`) is in the loop.
+- **Don't rescan a world-size collection inside a nested loop.** If a tick
+  phase loops over formations/factories/cities/goals and, for each one,
+  iterates all of `self.lots`/`self.assets`/`self.components`/
+  `self.buy_orders`/`self.sell_listings` again, that's an O(n²)-shaped bug
+  that gets worse every simulated day as the world grows. Build the index
+  you need once per tick (a `BTreeMap` keyed by whatever you're filtering
+  on) before the outer loop, the same way `production.rs`'s
+  `tick_factory_auto_production`, `faction_ai.rs`'s `tick_faction_ai`, and
+  `markets.rs`'s `tick_market_matching`/`tick_civilian_demand` do. When in
+  doubt: name what grows without bound as the game runs (days, factions,
+  lots, formations) and make sure no phase's cost multiplies two of those
+  together.
+
 ## Process notes
 
 - **Verify by actually driving the simulation, not just checking it
