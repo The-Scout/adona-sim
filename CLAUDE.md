@@ -63,6 +63,59 @@ in `assets/world_seed.json`, supplying Adona's actual 5 materials and its
 would ship a different JSON and a different tier count through the exact
 same function.
 
+## Everything should be data-driven
+
+This generalizes the modularity rule above from "content" (faction names,
+materials, tiers) to *any* tunable number or behavior parameter. If you
+catch yourself writing a bare numeric literal into engine or game logic —
+a quantity, a duration, a percentage, a threshold, a chance-per-day — stop
+and ask whether it's a genuine invariant of the simulation or an actual
+tunable that should vary by scenario.
+
+- **Genuine invariants** (rules the simulation's design depends on, like
+  `MECH_COMPONENT_SLOTS == 5`) can stay as named `const`s in `adona-sim`,
+  documented as deliberate product rules.
+- **Everything else is data.** Economy tuning (mine yields, refine/convert
+  quantities, durations), world-seed numbers (population, tax rates,
+  starting treasuries), doctrine parameters — these belong in the data file
+  that already exists for the purpose (`world_seed.json`'s `economy` block
+  is the template to extend, not to work around) or a new one, never a
+  literal buried in a function body.
+- Rule of thumb: **if changing the number requires a recompile, ask whether
+  it should have only required editing a JSON file instead.**
+
+## Follow Rust best practices
+
+Match the patterns already established in this codebase — don't regress
+them when adding new code:
+
+- Prefer `Result<T, SimError>` over panicking for anything that can fail
+  from real-world input (unknown ids, insufficient stock, invalid state
+  transitions). Reserve `.unwrap()`/`.expect()` for cases that are true
+  programmer errors or already validated earlier in the same call — and say
+  so in a comment when it isn't obvious why the unwrap is safe.
+- Use the newtype id pattern (`ActorId`, `LocationId`, etc., via the
+  `define_id!` macro in `ids.rs`) for anything that could otherwise be
+  confused with a bare `u64`. Never pass raw integers between domains.
+- Keep state in `BTreeMap`/`BTreeSet`, never `HashMap`/`HashSet`, for
+  anything that feeds `World::tick()` or `state_digest()` — iteration order
+  must stay deterministic (see `world.rs`'s determinism contract). This is
+  not a style preference; using a `HashMap` here is a correctness bug.
+- Run `cargo clippy --workspace --all-targets` and `cargo fmt --check`
+  before considering a change done. Fix warnings rather than silence them;
+  an `#[allow(...)]` needs a comment explaining why the lint doesn't apply.
+- Write doc comments (`///`) that explain *why*, not *what* — the existing
+  modules (`production.rs`, `combat.rs`, `war.rs`) are full of good
+  examples. A comment that just restates the function's name in prose isn't
+  worth writing.
+- Avoid needless `.clone()` in tick-path code. When a clone is genuinely
+  required (e.g. to end a borrow before a mutating call), a short comment
+  saying why saves the next person from "optimizing" it back into a
+  borrow-checker error.
+- Match the module-per-domain layout already established (`combat.rs`,
+  `markets.rs`, `production.rs`, `locations.rs`, etc.) — a new system gets
+  its own module rather than growing inside an unrelated one.
+
 ## Hardening: validate values, avoid unnecessary writes
 
 This runs on a real machine against a real SSD, and `crates/adona-sim`'s
