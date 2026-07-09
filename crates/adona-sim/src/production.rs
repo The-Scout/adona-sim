@@ -123,6 +123,11 @@ pub struct ProductionJob {
     pub state: JobState,
 }
 
+/// A candidate recipe for `tick_factory_auto_production`'s priority ranking:
+/// (is tooled, output tier rank, real backlog, id, lots to offer, components
+/// to offer) — see that function for what each field means.
+type AutoProductionCandidate = (bool, u8, u64, RecipeId, Vec<LotId>, Vec<ComponentId>);
+
 impl World {
     pub fn create_factory(
         &mut self,
@@ -606,7 +611,7 @@ impl World {
                 }
             }
 
-            let mut best: Option<(bool, u8, u64, RecipeId, Vec<LotId>, Vec<ComponentId>)> = None;
+            let mut best: Option<AutoProductionCandidate> = None;
             for (recipe_id, recipe) in &self.recipes {
                 if recipe.required_tooling_design.is_some() && recipe.required_tooling_design != tooling_design {
                     continue;

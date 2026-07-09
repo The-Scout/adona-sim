@@ -536,10 +536,8 @@ impl World {
                 v.push(format!("{id} employer {} does not exist", c.employer));
             }
             match c.state {
-                ContractState::Open | ContractState::Accepted { .. } => {
-                    if c.escrowed_payment <= 0 {
-                        v.push(format!("{id} is live without escrowed payment"));
-                    }
+                ContractState::Open | ContractState::Accepted { .. } if c.escrowed_payment <= 0 => {
+                    v.push(format!("{id} is live without escrowed payment"));
                 }
                 _ => {}
             }

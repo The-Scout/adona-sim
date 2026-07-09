@@ -27,6 +27,10 @@ use crate::SimError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Real lots available per (owner, site, commodity), gathered once per
+/// `tick_faction_ai` call and reused across every goal/shortage that tick.
+type LotsByOwnerSiteCommodity = BTreeMap<(ActorId, LocationId, CommodityId), Vec<(LotId, u64)>>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactionGoal {
     pub id: FactionGoalId,
@@ -74,8 +78,7 @@ impl World {
         // tick, instead of rescanning all lots/buy-orders once per
         // candidate factory or per shortage — that used to scale as
         // O(goals x shortages x total_lots) every single day.
-        let mut lots_by_owner_site_commodity: BTreeMap<(ActorId, LocationId, CommodityId), Vec<(LotId, u64)>> =
-            BTreeMap::new();
+        let mut lots_by_owner_site_commodity: LotsByOwnerSiteCommodity = BTreeMap::new();
         let mut owned_by_owner_commodity: BTreeMap<(ActorId, CommodityId), u64> = BTreeMap::new();
         for (lid, lot) in &self.lots {
             if lot.state != LotState::Active {
@@ -136,7 +139,7 @@ impl World {
         &mut self,
         goal: &FactionGoal,
         design: DesignId,
-        lots_by_owner_site_commodity: &BTreeMap<(ActorId, LocationId, CommodityId), Vec<(LotId, u64)>>,
+        lots_by_owner_site_commodity: &LotsByOwnerSiteCommodity,
     ) -> bool {
         let candidate_factories: Vec<FactoryId> = self
             .factories

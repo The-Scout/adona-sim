@@ -449,10 +449,7 @@ impl World {
 
         let order_ids: Vec<BuyOrderId> = self.buy_orders.keys().copied().collect();
         for order_id in order_ids {
-            loop {
-                let Some(order) = self.buy_orders.get(&order_id).cloned() else {
-                    break;
-                };
+            while let Some(order) = self.buy_orders.get(&order_id).cloned() {
                 let candidates = listings_by_commodity.get(&order.commodity).cloned().unwrap_or_default();
                 let mut best: Option<(Credits, SellListingId)> = None;
                 for lid in candidates {
@@ -471,7 +468,7 @@ impl World {
                         }
                     }
                     let candidate = (listing.price_per_unit, lid);
-                    if best.map_or(true, |b| candidate < b) {
+                    if best.is_none_or(|b| candidate < b) {
                         best = Some(candidate);
                     }
                 }
