@@ -33,6 +33,7 @@
 pub mod actors;
 pub mod assets;
 pub mod combat;
+pub mod content;
 pub mod contracts;
 pub mod convoys;
 pub mod error;

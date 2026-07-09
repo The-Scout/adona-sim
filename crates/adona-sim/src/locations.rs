@@ -8,11 +8,12 @@
 
 use crate::actors::Credits;
 use crate::events::EventKind;
-use crate::goods::LotState;
+use crate::goods::{LegalStatus, Lineage, LotOrigin, LotState, QualityGrade};
 use crate::ids::*;
 use crate::world::World;
 use crate::SimError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocationKind {
@@ -37,6 +38,16 @@ pub enum LocationKind {
 pub enum MineReserves {
     Infinite,
     Finite { remaining: u64 },
+}
+
+/// One independent automatic-production line at a location: a commodity, a
+/// daily quantity, and its own real depletion tracking (separate from the
+/// location's `mine_reserves`, which is a distinct, on-demand-only pool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationYield {
+    pub commodity: CommodityId,
+    pub quantity_per_day: u64,
+    pub reserves: MineReserves,
 }
 
 /// A daily civilian demand line for a city. Cities with population and needs
@@ -72,12 +83,24 @@ pub struct Location {
     /// satisfied. Suppresses population growth above a threshold — the
     /// urgency signal the docket's price-feedback question was asking for.
     pub unrest_pct: u32,
-    /// `Some` only for kind == Mine.
+    /// `Some` only for kind == Mine. Gates `World::produce_from_mine`
+    /// (on-demand extraction), independent of `yields` below.
     pub mine_reserves: Option<MineReserves>,
+    /// Automatic daily production (docket TODO(production): "mines as
+    /// scheduled producers in tick with labor, equipment, and output rates
+    /// instead of on-demand extraction"). A location can hold any number of
+    /// independent yields — e.g. a faction's capital producing several raw
+    /// materials for its own industry at once — each with its own real
+    /// depletion tracking. Not restricted to `LocationKind::Mine`: what a
+    /// site is *labeled* and what it can produce are independent questions.
+    pub yields: Vec<LocationYield>,
     /// The faction currently holding this site, if any. Combat is the only
     /// thing that changes this once set (docket: faction-war territory
     /// control); it starts unclaimed.
     pub controller: Option<ActorId>,
+    /// The day `controller` last changed hands. Feeds the entrenchment bonus
+    /// in `combat::resolve_battle` — ground held longer is dug in deeper.
+    pub controlled_since: u64,
 }
 
 /// Where a physical thing currently is. Exactly one of these per lot/asset/
@@ -117,11 +140,81 @@ impl World {
                 tax_rate_per_capita: 0,
                 unrest_pct: 0,
                 mine_reserves,
+                yields: Vec::new(),
                 controller: None,
+                controlled_since: 0,
             },
         );
         self.push_event(EventKind::LocationCreated { location: id });
         id
+    }
+
+    /// Add an automatic daily production line to a location (see
+    /// `tick_location_yields`): every day it produces `quantity_per_day` of
+    /// `commodity` for its controller, depleting `reserves` independently of
+    /// any other yield at the same site or the location's own
+    /// `mine_reserves`. Not restricted to `LocationKind::Mine` — a
+    /// location's real productive capacity is data, not implied by its
+    /// label. A location can hold any number of these (e.g. a capital city
+    /// producing several raw materials for its own industry at once).
+    pub fn add_location_yield(
+        &mut self,
+        location: LocationId,
+        commodity: CommodityId,
+        quantity_per_day: u64,
+        reserves: MineReserves,
+    ) -> Result<(), SimError> {
+        if !self.commodities.contains_key(&commodity) {
+            return Err(SimError::UnknownCommodity(commodity));
+        }
+        let loc = self.locations.get_mut(&location).ok_or(SimError::UnknownLocation(location))?;
+        loc.yields.push(LocationYield { commodity, quantity_per_day, reserves });
+        self.push_event(EventKind::AdminEdit {
+            operator: None,
+            description: format!("added a {quantity_per_day}/day yield to {location}"),
+        });
+        Ok(())
+    }
+
+    /// Automatic daily production: every location with a real controller
+    /// and at least one configured yield produces real commodity for that
+    /// controller from each yield line, respecting that line's own `Finite`
+    /// depletion. Unclaimed locations and locations with no configured
+    /// yield produce nothing on their own.
+    pub(crate) fn tick_location_yields(&mut self) {
+        let due: Vec<(LocationId, ActorId, usize, CommodityId, u64)> = self
+            .locations
+            .values()
+            .filter_map(|l| {
+                let controller = l.controller?;
+                Some(l.yields.iter().enumerate().filter_map(move |(i, y)| {
+                    let has_capacity = match y.reserves {
+                        MineReserves::Infinite => true,
+                        MineReserves::Finite { remaining } => remaining >= y.quantity_per_day,
+                    };
+                    has_capacity.then_some((l.id, controller, i, y.commodity, y.quantity_per_day))
+                }))
+            })
+            .flatten()
+            .collect();
+
+        for (location, controller, index, commodity, quantity) in due {
+            let lot = self.create_lot_raw(
+                controller,
+                commodity,
+                quantity,
+                QualityGrade::Standard,
+                LegalStatus::Legitimate,
+                LocationRef::Site(location),
+                Lineage::Root(LotOrigin::Mined { mine: location }),
+            );
+            let Ok(lot) = lot else { continue };
+            if let MineReserves::Finite { remaining } = self.locations[&location].yields[index].reserves {
+                self.locations.get_mut(&location).unwrap().yields[index].reserves =
+                    MineReserves::Finite { remaining: remaining.saturating_sub(quantity) };
+            }
+            self.push_event(EventKind::MineYield { mine: location, lot, quantity });
+        }
     }
 
     /// Set population, purchasing authority, and daily civilian needs for a
@@ -175,6 +268,18 @@ impl World {
             .map(|(id, _)| *id)
             .collect();
 
+        // Built once for this whole tick, instead of rescanning every lot
+        // in the world for every civilian need at every city.
+        let mut lots_by_owner_site_commodity: BTreeMap<(ActorId, LocationId, CommodityId), Vec<LotId>> = BTreeMap::new();
+        for (lid, lot) in &self.lots {
+            if lot.state != LotState::Active {
+                continue;
+            }
+            if let Some(site) = self.resolve_site(lot.location) {
+                lots_by_owner_site_commodity.entry((lot.owner, site, lot.commodity)).or_default().push(*lid);
+            }
+        }
+
         for city in cities {
             let (authority, needs, population, tax_rate, unrest) = {
                 let l = &self.locations[&city];
@@ -185,17 +290,10 @@ impl World {
             if let Some(authority) = authority {
                 for need in &needs {
                     let mut remaining = need.quantity_per_day;
-                    let candidate_lots: Vec<LotId> = self
-                        .lots
-                        .iter()
-                        .filter(|(_, l)| {
-                            l.owner == authority
-                                && l.commodity == need.commodity
-                                && l.state == LotState::Active
-                                && self.resolve_site(l.location) == Some(city)
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
+                    let candidate_lots = lots_by_owner_site_commodity
+                        .get(&(authority, city, need.commodity))
+                        .cloned()
+                        .unwrap_or_default();
                     for lid in candidate_lots {
                         if remaining == 0 {
                             break;
@@ -251,8 +349,10 @@ impl World {
                 return Err(SimError::UnknownActor(owner));
             }
         }
+        let day = self.clock.day;
         let loc = self.locations.get_mut(&site).ok_or(SimError::UnknownLocation(site))?;
         loc.controller = controller;
+        loc.controlled_since = day;
         self.push_event(EventKind::AdminEdit {
             operator: None,
             description: format!("set {site} controller to {controller:?}"),
@@ -318,4 +418,67 @@ impl World {
             LocationRef::Formation(id) => self.formations.contains_key(&id),
         }
     }
+
+    /// World-generation phase: a small daily chance that prospectors turn up
+    /// a new, unclaimed mine somewhere near the existing map, wired into the
+    /// route network so it is real ground factions can actually reach and
+    /// fight over — never a mine that only exists as a name in a list.
+    /// TODO(worldgen): terrain-aware placement once the map is more than an
+    /// abstract grid (see `Location::position`'s own TODO).
+    pub(crate) fn tick_mine_discovery(&mut self) {
+        const DISCOVERY_CHANCE_PCT: u8 = 3;
+        const INFINITE_CHANCE_PCT: u8 = 10;
+        if self.locations.is_empty() {
+            return;
+        }
+        if self.rng.roll_percent() >= DISCOVERY_CHANCE_PCT {
+            return;
+        }
+
+        let (min_x, max_x, min_y, max_y) = self.locations.values().fold(
+            (i64::MAX, i64::MIN, i64::MAX, i64::MIN),
+            |(min_x, max_x, min_y, max_y), l| {
+                let (x, y) = l.position;
+                (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+            },
+        );
+        // Sample within the existing map's bounding box plus a margin so
+        // discoveries land near the known world instead of arbitrarily far
+        // from anything reachable.
+        let margin = 10;
+        let span_x = (max_x - min_x + 2 * margin).max(1) as u64;
+        let span_y = (max_y - min_y + 2 * margin).max(1) as u64;
+        let x = min_x - margin + self.rng.roll_range(span_x) as i64;
+        let y = min_y - margin + self.rng.roll_range(span_y) as i64;
+
+        let nearest = self
+            .locations
+            .values()
+            .min_by_key(|l| chebyshev_distance(l.position, (x, y)))
+            .map(|l| (l.id, l.position))
+            .expect("checked locations is non-empty above");
+        let distance_days = (chebyshev_distance(nearest.1, (x, y)) / 4).max(1);
+
+        let name = format!("Prospect Site {}", self.next_id);
+        let mine = self.create_location(&name, LocationKind::Mine, (x, y));
+
+        let reserves = if self.rng.roll_percent() < INFINITE_CHANCE_PCT {
+            MineReserves::Infinite
+        } else {
+            MineReserves::Finite { remaining: 5_000 + self.rng.roll_range(45_000) }
+        };
+        self.configure_mine(mine, reserves).expect("mine was just created");
+
+        // Connect both directions: convoys and marching formations only
+        // travel along a route from their current site, so a one-way link
+        // would strand traffic in one direction.
+        let _ = self.create_route(mine, nearest.0, distance_days);
+        let _ = self.create_route(nearest.0, mine, distance_days);
+
+        self.push_event(EventKind::MineDiscovered { mine });
+    }
+}
+
+fn chebyshev_distance(a: (i64, i64), b: (i64, i64)) -> u64 {
+    a.0.abs_diff(b.0).max(a.1.abs_diff(b.1))
 }

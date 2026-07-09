@@ -27,6 +27,10 @@ use crate::SimError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Real lots available per (owner, site, commodity), gathered once per
+/// `tick_faction_ai` call and reused across every goal/shortage that tick.
+type LotsByOwnerSiteCommodity = BTreeMap<(ActorId, LocationId, CommodityId), Vec<(LotId, u64)>>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactionGoal {
     pub id: FactionGoalId,
@@ -69,22 +73,74 @@ impl World {
     /// docket's `ToeShortage` demand signal was always meant to feed.
     pub(crate) fn tick_faction_ai(&mut self) {
         let goals: Vec<FactionGoal> = self.faction_goals.values().cloned().collect();
+
+        // Built once per tick and reused across every goal/shortage this
+        // tick, instead of rescanning all lots/buy-orders once per
+        // candidate factory or per shortage — that used to scale as
+        // O(goals x shortages x total_lots) every single day.
+        let mut lots_by_owner_site_commodity: LotsByOwnerSiteCommodity = BTreeMap::new();
+        let mut owned_by_owner_commodity: BTreeMap<(ActorId, CommodityId), u64> = BTreeMap::new();
+        for (lid, lot) in &self.lots {
+            if lot.state != LotState::Active {
+                continue;
+            }
+            *owned_by_owner_commodity.entry((lot.owner, lot.commodity)).or_insert(0) += lot.quantity;
+            if let Some(site) = self.resolve_site(lot.location) {
+                lots_by_owner_site_commodity.entry((lot.owner, site, lot.commodity)).or_default().push((*lid, lot.quantity));
+            }
+        }
+        let mut global_orders_by_owner_commodity: std::collections::BTreeSet<(ActorId, CommodityId)> =
+            std::collections::BTreeSet::new();
+        for o in self.buy_orders.values() {
+            if o.scope == OrderScope::Global {
+                global_orders_by_owner_commodity.insert((o.buyer, o.commodity));
+            }
+        }
+
         for goal in goals {
             let Ok(shortages) = self.toe_shortages(goal.owner, goal.template, goal.site) else {
                 continue;
             };
             for shortage in shortages {
-                if self.try_produce_toward_shortage(&goal, shortage.design) {
+                if self.try_produce_toward_shortage(&goal, shortage.design, &lots_by_owner_site_commodity) {
                     continue;
                 }
-                self.order_inputs_toward_shortage(&goal, shortage.design);
+                self.order_inputs_toward_shortage(
+                    &goal,
+                    shortage.design,
+                    &owned_by_owner_commodity,
+                    &global_orders_by_owner_commodity,
+                );
             }
+        }
+    }
+
+    /// Reinforcement phase: try to assemble one additional formation per
+    /// standing TO&E goal from whatever real, unassigned assets already
+    /// exist at the goal's site. Production only ever creates loose assets
+    /// (`tick_factory_auto_production`); without this, manufactured
+    /// replacements would sit at home forever instead of ever joining a
+    /// formation that can march or fight. `try_assemble_formation` only
+    /// succeeds when there are enough real free assets to fill the whole
+    /// template, so this is a cheap no-op most ticks — not a planner, just
+    /// a standing "assemble what you can, whenever you can."
+    pub(crate) fn tick_faction_reinforcement(&mut self) {
+        let goals: Vec<FactionGoal> = self.faction_goals.values().cloned().collect();
+        let today = self.clock.day;
+        for goal in goals {
+            let name = format!("Reinforcement Company (day {today})");
+            let _ = self.try_assemble_formation(goal.owner, goal.template, &name, goal.site);
         }
     }
 
     /// Attempt (1): a real, already-tooled, already-stocked factory can run
     /// the recipe right now. Returns true if a job was started.
-    fn try_produce_toward_shortage(&mut self, goal: &FactionGoal, design: DesignId) -> bool {
+    fn try_produce_toward_shortage(
+        &mut self,
+        goal: &FactionGoal,
+        design: DesignId,
+        lots_by_owner_site_commodity: &LotsByOwnerSiteCommodity,
+    ) -> bool {
         let candidate_factories: Vec<FactoryId> = self
             .factories
             .iter()
@@ -104,22 +160,16 @@ impl World {
                 continue;
             };
 
-            // Gather real, active, owner-held lots at the factory's site
-            // that could cover the recipe's inputs.
+            // Real, active, owner-held lots at the factory's site that
+            // could cover the recipe's inputs — read from the snapshot
+            // built once for this whole tick, not rescanned per factory.
             let mut offered: Vec<LotId> = Vec::new();
             let mut covered: BTreeMap<CommodityId, u64> = BTreeMap::new();
-            for (lid, lot) in &self.lots {
-                if lot.owner != goal.owner || lot.state != LotState::Active {
-                    continue;
+            for (commodity, _) in &recipe.inputs {
+                if let Some(matching) = lots_by_owner_site_commodity.get(&(goal.owner, factory_site, *commodity)) {
+                    covered.insert(*commodity, matching.iter().map(|(_, qty)| qty).sum());
+                    offered.extend(matching.iter().map(|(lid, _)| *lid));
                 }
-                if self.resolve_site(lot.location) != Some(factory_site) {
-                    continue;
-                }
-                if !recipe.inputs.iter().any(|(c, _)| *c == lot.commodity) {
-                    continue;
-                }
-                *covered.entry(lot.commodity).or_insert(0) += lot.quantity;
-                offered.push(*lid);
             }
             let has_enough = recipe.inputs.iter().all(|(c, qty)| covered.get(c).copied().unwrap_or(0) >= *qty);
             if !has_enough {
@@ -127,7 +177,7 @@ impl World {
             }
 
             let recipe_id = *recipe_id;
-            if let Ok(job) = self.start_production(factory_id, recipe_id, &offered) {
+            if let Ok(job) = self.start_production(factory_id, recipe_id, &offered, &[]) {
                 self.push_event(EventKind::FactionProcurementStarted { goal: goal.id, job });
                 return true;
             }
@@ -139,7 +189,13 @@ impl World {
     /// whatever recipe inputs are short, so a future tick can produce.
     /// Skips commodities the faction already has an open global order for,
     /// mirroring civilian demand's one-order-at-a-time discipline.
-    fn order_inputs_toward_shortage(&mut self, goal: &FactionGoal, design: DesignId) {
+    fn order_inputs_toward_shortage(
+        &mut self,
+        goal: &FactionGoal,
+        design: DesignId,
+        owned_by_owner_commodity: &BTreeMap<(ActorId, CommodityId), u64>,
+        global_orders_by_owner_commodity: &std::collections::BTreeSet<(ActorId, CommodityId)>,
+    ) {
         let Some((_, recipe)) = self
             .recipes
             .iter()
@@ -150,25 +206,17 @@ impl World {
         };
 
         for (commodity, required_qty) in recipe.inputs.clone() {
-            let owned: u64 = self
-                .lots
-                .values()
-                .filter(|l| l.owner == goal.owner && l.commodity == commodity && l.state == LotState::Active)
-                .map(|l| l.quantity)
-                .sum();
+            let owned = owned_by_owner_commodity.get(&(goal.owner, commodity)).copied().unwrap_or(0);
             if owned >= required_qty {
                 continue;
             }
-            let already_ordering = self.buy_orders.values().any(|o| {
-                o.buyer == goal.owner && o.commodity == commodity && o.scope == OrderScope::Global
-            });
-            if already_ordering {
+            if global_orders_by_owner_commodity.contains(&(goal.owner, commodity)) {
                 continue;
             }
             let Some(def) = self.commodities.get(&commodity) else { continue };
             let reference = self.price_index_anywhere(commodity).unwrap_or(def.base_price);
             let limit: Credits = reference.saturating_mul(115) / 100;
-            let missing = required_qty - owned;
+            let missing = required_qty.saturating_sub(owned);
             if let Ok(order) = self.place_buy_order(goal.owner, OrderScope::Global, commodity, missing, limit) {
                 self.push_event(EventKind::FactionProcurementOrdered { goal: goal.id, order, commodity });
             }
@@ -186,33 +234,70 @@ impl World {
     }
 
     /// Automatic deployment phase: a formation stationed on ground its own
-    /// owner controls marches toward the first (by route id, for
-    /// determinism) adjacent site it does *not* control — contested or
-    /// enemy-held territory — instead of sitting still forever. This is the
-    /// war AI's answer to docket TODO(war): factions actively press toward
-    /// contested/enemy ground rather than only fighting where formations
-    /// already happen to be. A formation already standing on contested or
-    /// enemy ground is left alone; that's what `tick_faction_war` is for.
+    /// owner controls marches toward an adjacent site it does *not*
+    /// control — contested or enemy-held territory — instead of sitting
+    /// still forever. This is the war AI's answer to docket TODO(war):
+    /// factions actively press toward contested/enemy ground rather than
+    /// only fighting where formations already happen to be. A formation
+    /// already standing on contested or enemy ground is left alone; that's
+    /// what `tick_faction_war` is for.
+    ///
+    /// Holding the line: a site with an outgoing route to non-owned ground
+    /// is a frontline site, and one formation is always kept there as a
+    /// garrison rather than every defender marching off at once — only
+    /// formations beyond the first are eligible to advance. Interior sites
+    /// (no route to non-owned ground) have nothing to hold, so every
+    /// formation there is free to march. Among eligible destinations, the
+    /// AI prefers the one held by the fewest real defending assets — pushing
+    /// where the enemy is weakest — tie-broken by route id for determinism.
     pub(crate) fn tick_faction_deployment(&mut self) {
-        let formations: Vec<FormationId> = self.formations.keys().copied().collect();
-        for fid in formations {
-            let Some(formation) = self.formations.get(&fid) else { continue };
+        let mut by_site: BTreeMap<(ActorId, LocationId), Vec<FormationId>> = BTreeMap::new();
+        for (fid, formation) in &self.formations {
             let Some(at) = formation.current_site() else { continue };
             let owner = formation.owner;
-            let home_controller = self.locations.get(&at).and_then(|l| l.controller);
-            if home_controller != Some(owner) {
+            if self.locations.get(&at).and_then(|l| l.controller) != Some(owner) {
                 continue;
             }
-            let mut routes: Vec<&Route> = self.routes.values().filter(|r| r.from == at).collect();
+            by_site.entry((owner, at)).or_default().push(*fid);
+        }
+
+        for ((owner, at), mut formations) in by_site {
+            formations.sort();
+            let mut routes: Vec<Route> = self.routes.values().filter(|r| r.from == at).cloned().collect();
             routes.sort_by_key(|r| r.id);
-            for route in routes {
-                let dest_controller = self.locations.get(&route.to).and_then(|l| l.controller);
-                if dest_controller != Some(owner) {
+            let is_frontline = routes
+                .iter()
+                .any(|r| self.locations.get(&r.to).and_then(|l| l.controller) != Some(owner));
+
+            // Keep one garrison formation on a frontline site; interior
+            // sites have nothing to hold.
+            let eligible: Vec<FormationId> = if is_frontline {
+                formations.into_iter().skip(1).collect()
+            } else {
+                formations
+            };
+
+            for fid in eligible {
+                let target = routes
+                    .iter()
+                    .filter(|r| self.locations.get(&r.to).and_then(|l| l.controller) != Some(owner))
+                    .min_by_key(|r| (self.defending_asset_count(r.to), r.id));
+                if let Some(route) = target {
                     let route_id = route.id;
                     let _ = self.order_formation_march(fid, route_id);
-                    break;
                 }
             }
         }
+    }
+
+    /// Real defending strength at a site: total assets across every
+    /// formation stationed there, the same signal the deployment AI itself
+    /// can see (no hidden knowledge of enemy strength).
+    fn defending_asset_count(&self, site: LocationId) -> usize {
+        self.formations
+            .values()
+            .filter(|f| f.current_site() == Some(site))
+            .map(|f| f.assets.len())
+            .sum()
     }
 }

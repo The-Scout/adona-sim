@@ -28,6 +28,13 @@ use serde::{Deserialize, Serialize};
 /// Defenders fighting from their own ground get a real, mechanical edge —
 /// the RISK-style bias requested for this first collapsed model.
 pub const DEFENDER_BONUS_PCT: u64 = 120;
+/// Extra defender bonus per day the site has been continuously held,
+/// representing real entrenchment rather than an arbitrary flat number — a
+/// frontline held for weeks is dug in deeper than ground captured yesterday.
+pub const ENTRENCHMENT_BONUS_PCT_PER_DAY: u64 = 2;
+/// Cap on the entrenchment bonus so an ancient, never-contested holding
+/// doesn't become mathematically unbreakable.
+pub const ENTRENCHMENT_BONUS_PCT_MAX: u64 = 60;
 /// Fraction of engaged units the losing side loses.
 pub const LOSER_ATTRITION_PCT: u64 = 35;
 /// Fraction of engaged units the winning side loses even so — war is not free.
@@ -63,6 +70,13 @@ pub struct BattleOutcome {
     pub defender: ActorId,
     pub attacker_power: u64,
     pub defender_power: u64,
+    /// The defender's real power after the home-ground and entrenchment
+    /// bonuses were applied — the number actually weighed against
+    /// `attacker_power` to decide the fight, useful for UI odds display.
+    pub defender_effective_power: u64,
+    /// Attacker's real win probability (0-100) given both sides' effective
+    /// power, before the random roll — real odds, not a hidden number.
+    pub attacker_win_pct: u8,
     pub attacker_won: bool,
     pub attacker_losses: Vec<AssetId>,
     pub defender_losses: Vec<AssetId>,
@@ -131,7 +145,17 @@ impl World {
         for &a in defender_assets {
             defender_power = defender_power.saturating_add(self.asset_combat_power(a)?);
         }
-        let defended_power = defender_power.saturating_mul(DEFENDER_BONUS_PCT) / 100;
+        // Entrenchment only applies when the defender is the site's actual,
+        // standing controller — contested/unclaimed ground grants no dug-in
+        // bonus just because nobody has fought over it recently.
+        let entrenchment_pct = if self.locations[&site].controller == Some(defender) {
+            let days_held = self.clock.day.saturating_sub(self.locations[&site].controlled_since);
+            days_held.saturating_mul(ENTRENCHMENT_BONUS_PCT_PER_DAY).min(ENTRENCHMENT_BONUS_PCT_MAX)
+        } else {
+            0
+        };
+        let defended_power =
+            defender_power.saturating_mul(DEFENDER_BONUS_PCT + entrenchment_pct) / 100;
 
         let total = (attacker_power as u128 + defended_power as u128).max(1);
         let attacker_win_pct = ((attacker_power as u128 * 100) / total).min(100) as u8;
@@ -179,9 +203,13 @@ impl World {
         }
 
         if attacker_won {
-            self.locations.get_mut(&site).unwrap().controller = Some(attacker);
+            let loc = self.locations.get_mut(&site).unwrap();
+            loc.controller = Some(attacker);
+            loc.controlled_since = self.clock.day;
         } else if self.locations[&site].controller.is_none() {
-            self.locations.get_mut(&site).unwrap().controller = Some(defender);
+            let loc = self.locations.get_mut(&site).unwrap();
+            loc.controller = Some(defender);
+            loc.controlled_since = self.clock.day;
         }
 
         self.push_event(EventKind::BattleResolved {
@@ -212,6 +240,8 @@ impl World {
             defender,
             attacker_power,
             defender_power,
+            defender_effective_power: defended_power,
+            attacker_win_pct,
             attacker_won,
             attacker_losses,
             defender_losses,

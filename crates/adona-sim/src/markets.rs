@@ -26,6 +26,7 @@ use crate::locations::LocationRef;
 use crate::world::World;
 use crate::SimError;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Market {
@@ -383,7 +384,12 @@ impl World {
         }
         let total = mul_money(quantity, listing.price_per_unit)?;
         let escrow_release = mul_money(quantity, order.limit_price_per_unit)?;
-        let refund = escrow_release - total;
+        // `listing.price_per_unit <= order.limit_price_per_unit` is enforced
+        // by whoever selected this listing to fill against this order (see
+        // `tick_market_matching`), so `escrow_release >= total` always holds
+        // in practice — saturating regardless, so a future caller that
+        // skips that check gets a real zero refund instead of a panic.
+        let refund = escrow_release.saturating_sub(total);
         let commodity = self.lots.get(&listing.lot).map(|lot| lot.commodity);
 
         let delivered = self.deliver_listed_lot(listing_id, order.buyer, quantity)?;
@@ -394,8 +400,8 @@ impl World {
         }
         let done = {
             let o = self.buy_orders.get_mut(&order_id).unwrap();
-            o.quantity -= quantity;
-            o.escrow -= escrow_release;
+            o.quantity = o.quantity.saturating_sub(quantity);
+            o.escrow = o.escrow.saturating_sub(escrow_release);
             o.quantity == 0
         };
         self.push_event(EventKind::TradeExecuted {
@@ -428,14 +434,28 @@ impl World {
     /// order), repeatedly fill from the cheapest compatible listing whose
     /// price is within the limit. Executes at listing price.
     pub(crate) fn tick_market_matching(&mut self) {
+        // Index listings by commodity once for the whole tick — a listing's
+        // commodity never changes while it's open, so this stays valid even
+        // as fills close listings during the loop below (a stale id is
+        // simply no longer in `self.sell_listings` and gets skipped). This
+        // used to rescan every open listing in the world on every fill
+        // attempt of every order: O(orders x fills x total_listings).
+        let mut listings_by_commodity: BTreeMap<CommodityId, Vec<SellListingId>> = BTreeMap::new();
+        for (lid, listing) in &self.sell_listings {
+            if let Some(lot) = self.lots.get(&listing.lot) {
+                listings_by_commodity.entry(lot.commodity).or_default().push(*lid);
+            }
+        }
+
         let order_ids: Vec<BuyOrderId> = self.buy_orders.keys().copied().collect();
         for order_id in order_ids {
-            loop {
-                let Some(order) = self.buy_orders.get(&order_id).cloned() else {
-                    break;
-                };
+            while let Some(order) = self.buy_orders.get(&order_id).cloned() {
+                let candidates = listings_by_commodity.get(&order.commodity).cloned().unwrap_or_default();
                 let mut best: Option<(Credits, SellListingId)> = None;
-                for (lid, listing) in &self.sell_listings {
+                for lid in candidates {
+                    let Some(listing) = self.sell_listings.get(&lid) else {
+                        continue; // already filled/closed earlier this tick
+                    };
                     if listing.seller == order.buyer {
                         continue;
                     }
@@ -447,14 +467,8 @@ impl World {
                             continue;
                         }
                     }
-                    let Some(lot) = self.lots.get(&listing.lot) else {
-                        continue;
-                    };
-                    if lot.commodity != order.commodity {
-                        continue;
-                    }
-                    let candidate = (listing.price_per_unit, *lid);
-                    if best.map_or(true, |b| candidate < b) {
+                    let candidate = (listing.price_per_unit, lid);
+                    if best.is_none_or(|b| candidate < b) {
                         best = Some(candidate);
                     }
                 }
@@ -485,25 +499,30 @@ impl World {
             .filter(|(_, l)| l.population > 0 && l.authority.is_some() && !l.civilian_needs.is_empty())
             .map(|(id, _)| *id)
             .collect();
+
+        // Built once for the whole tick instead of rescanning every market
+        // and every buy order for every city and every need.
+        let mut market_by_site: BTreeMap<LocationId, MarketId> = BTreeMap::new();
+        for (id, m) in &self.markets {
+            market_by_site.entry(m.site).or_insert(*id);
+        }
+        let mut open_market_orders: BTreeSet<(ActorId, CommodityId, MarketId)> = BTreeSet::new();
+        for o in self.buy_orders.values() {
+            if let OrderScope::Market(m) = o.scope {
+                open_market_orders.insert((o.buyer, o.commodity, m));
+            }
+        }
+
         for city in cities {
             let (authority, needs) = {
                 let l = &self.locations[&city];
                 (l.authority.unwrap(), l.civilian_needs.clone())
             };
-            let Some(market_id) = self
-                .markets
-                .iter()
-                .find(|(_, m)| m.site == city)
-                .map(|(id, _)| *id)
-            else {
+            let Some(&market_id) = market_by_site.get(&city) else {
                 continue;
             };
             for need in needs {
-                let already_open = self.buy_orders.values().any(|o| {
-                    o.buyer == authority
-                        && o.commodity == need.commodity
-                        && o.scope == OrderScope::Market(market_id)
-                });
+                let already_open = open_market_orders.contains(&(authority, need.commodity, market_id));
                 if already_open {
                     continue;
                 }

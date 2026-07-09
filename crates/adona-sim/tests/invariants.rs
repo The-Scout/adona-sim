@@ -4,7 +4,7 @@
 //! escrowed money, TO&E from real assets, immutable intel, and determinism.
 
 use adona_sim::actors::ActorKind;
-use adona_sim::assets::{AssetKind, AssetOrigin, ComponentCategory, ComponentSlot};
+use adona_sim::assets::{AssetKind, AssetOrigin, ComponentCategory, ComponentPlacement, ComponentSlot};
 use adona_sim::contracts::{ContractObjective, ContractState, ContractTarget, SalvageTerms};
 use adona_sim::convoys::ConvoyState;
 use adona_sim::goods::{LegalStatus, LotOrigin, LotState, QualityGrade, UnitOfMeasure};
@@ -12,7 +12,7 @@ use adona_sim::ids::*;
 use adona_sim::intel::IntelSubject;
 use adona_sim::locations::{CivilianNeed, LocationKind, LocationRef};
 use adona_sim::markets::OrderScope;
-use adona_sim::production::{JobState, RecipeOutputs};
+use adona_sim::production::{ComponentRequirement, JobState, RecipeOutputs};
 use adona_sim::storage::{InMemoryStore, SimStore};
 use adona_sim::toe::ToeSlot;
 use adona_sim::{SimError, World};
@@ -169,11 +169,12 @@ fn build_scenario(seed: u64) -> Scenario {
     let recipe = w.define_recipe(
         "Roll Armor Plate",
         vec![(iron_ore, 8_000)],
+        vec![],
         RecipeOutputs::Commodity { commodity: armor_plate, quantity: 4_000 },
         3,
         Some(tooling_design),
     );
-    let job = w.start_production(factory, recipe, &[ore_lot]).unwrap();
+    let job = w.start_production(factory, recipe, &[ore_lot], &[]).unwrap();
     w.tick();
     w.tick();
     w.tick(); // completes on day 5
@@ -548,11 +549,12 @@ fn production_fails_without_sufficient_real_inputs() {
     let recipe = w.define_recipe(
         "Roll Armor Plate (again)",
         vec![(s.iron_ore, 8_000)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 4_000 },
         3,
         None,
     );
-    match w.start_production(s.factory, recipe, &[small_ore]) {
+    match w.start_production(s.factory, recipe, &[small_ore], &[]) {
         Err(SimError::InsufficientQuantity { missing, .. }) => assert_eq!(missing, 7_900),
         other => panic!("production ran without real inputs: {other:?}"),
     }
@@ -572,6 +574,7 @@ fn tooling_binds_production_to_exact_designs() {
     let recipe = w.define_recipe(
         "Mill Autocannon Barrels",
         vec![(s.iron_ore, 100)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 10 },
         1,
         Some(other_tooling_design),
@@ -582,7 +585,7 @@ fn tooling_binds_production_to_exact_designs() {
     w.admin_move_lot(ore, LocationRef::Site(s.forge), None).unwrap();
     // The factory has Armor Plate Line tooling, not Autocannon Line.
     assert_eq!(
-        w.start_production(s.factory, recipe, &[ore]),
+        w.start_production(s.factory, recipe, &[ore], &[]),
         Err(SimError::ToolingMismatch { factory: s.factory })
     );
 }
@@ -1002,41 +1005,59 @@ fn formations_march_on_contested_ground_and_fight_on_arrival() {
             w.define_toe_template("Ad Hoc", "line", vec![ToeSlot { role: "Line".into(), design, count: n }]);
         w.try_assemble_formation(owner, template, "Ad Hoc Force", at).unwrap()
     };
-    let karth_formation = make_formation(&mut w, karth, home, 5);
+    // Two formations at home: home is a frontline site (route to Veyra-held
+    // ground), so the deployment AI keeps one as garrison and only marches
+    // the surplus — a lone defender is never expected to abandon the line.
+    let garrison_formation = make_formation(&mut w, karth, home, 5);
+    let attack_formation = make_formation(&mut w, karth, home, 5);
     // A lone outmatched defender already sitting on the frontier: enough to
     // prove the battle really happened, not enough to win it.
     make_formation(&mut w, veyra, frontier, 1);
 
-    // Tick 1: Karth's formation, stationed on its own controlled ground with
-    // a route to Veyra-held ground, marches automatically — no manual order
-    // given.
+    // Tick 1: one of Karth's two formations at its own controlled ground
+    // with a route to Veyra-held ground marches automatically — no manual
+    // order given — while the other stays behind to hold the line.
     w.tick();
-    match w.formation(karth_formation).unwrap().state {
+    let marched_formation = if w.formation(garrison_formation).unwrap().current_site().is_none() {
+        garrison_formation
+    } else {
+        attack_formation
+    };
+    let held_formation = if marched_formation == garrison_formation { attack_formation } else { garrison_formation };
+
+    match w.formation(marched_formation).unwrap().state {
         FormationState::EnRoute { route: r, .. } => assert_eq!(r, route),
         other => panic!("formation on controlled ground with a hostile-held neighbor did not march: {other:?}"),
     }
-    assert!(w.formation(karth_formation).unwrap().current_site().is_none(), "en route formation is on no site");
-    let marched = w
-        .events()
-        .iter()
-        .any(|e| matches!(&e.kind, EventKind::FormationMarchOrdered { formation, .. } if *formation == karth_formation));
+    assert!(w.formation(marched_formation).unwrap().current_site().is_none(), "en route formation is on no site");
+    assert_eq!(
+        w.formation(held_formation).unwrap().current_site(),
+        Some(home),
+        "a frontline site must keep at least one garrison formation"
+    );
+    let marched = w.events().iter().any(
+        |e| matches!(&e.kind, EventKind::FormationMarchOrdered { formation, .. } if *formation == marched_formation),
+    );
     assert!(marched, "no FormationMarchOrdered event was recorded");
     assert!(w.check_invariants().is_empty());
 
     // Tick 2: still en route (2-day route), cannot fight, cannot be ordered
     // to march again.
     w.tick();
-    assert!(matches!(w.formation(karth_formation).unwrap().state, FormationState::EnRoute { .. }));
-    assert_eq!(w.order_formation_march(karth_formation, route), Err(SimError::FormationNotAtSite(karth_formation)));
+    assert!(matches!(w.formation(marched_formation).unwrap().state, FormationState::EnRoute { .. }));
+    assert_eq!(
+        w.order_formation_march(marched_formation, route),
+        Err(SimError::FormationNotAtSite(marched_formation))
+    );
 
     // Tick 3: arrives at the frontier and, sharing hostile ground with
     // Veyra's formation, fights automatically the same tick it lands.
     let before = w.events().len();
     w.tick();
-    assert_eq!(w.formation(karth_formation).unwrap().current_site(), Some(frontier));
+    assert_eq!(w.formation(marched_formation).unwrap().current_site(), Some(frontier));
     let arrived = w.events()[before..]
         .iter()
-        .any(|e| matches!(&e.kind, EventKind::FormationArrived { formation, at } if *formation == karth_formation && *at == frontier));
+        .any(|e| matches!(&e.kind, EventKind::FormationArrived { formation, at } if *formation == marched_formation && *at == frontier));
     assert!(arrived, "no FormationArrived event was recorded");
     let fought = w.events()[before..].iter().any(|e| matches!(&e.kind, EventKind::BattleResolved { .. }));
     assert!(fought, "formation did not fight immediately on arrival at hostile ground");
@@ -1326,6 +1347,7 @@ fn faction_ai_produces_toward_a_real_toe_shortage_when_it_can() {
     w.define_recipe(
         "Assemble Talon",
         vec![(s.iron_ore, 100)],
+        vec![],
         RecipeOutputs::SerialAssets { design: s.talon_design, count: 1 },
         1,
         Some(mech_tooling_design),
@@ -1383,6 +1405,7 @@ fn faction_ai_orders_missing_inputs_when_it_cannot_produce_yet() {
     w.define_recipe(
         "Assemble Talon",
         vec![(s.iron_ore, 100)],
+        vec![],
         RecipeOutputs::SerialAssets { design: s.talon_design, count: 1 },
         1,
         Some(mech_tooling_design),
@@ -1652,6 +1675,7 @@ fn factories_cannot_produce_until_all_five_sub_systems_are_fitted() {
     let recipe = w.define_recipe(
         "Roll Armor Plate (bare factory)",
         vec![(s.iron_ore, 10)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 5 },
         1,
         None,
@@ -1659,7 +1683,7 @@ fn factories_cannot_produce_until_all_five_sub_systems_are_fitted() {
     let ore = w.produce_from_mine(s.redrock_mine, s.karth, s.iron_ore, 10, QualityGrade::Standard).unwrap();
     w.admin_move_lot(ore, LocationRef::Site(s.forge), None).unwrap();
 
-    match w.start_production(bare_factory, recipe, &[ore]) {
+    match w.start_production(bare_factory, recipe, &[ore], &[]) {
         Err(SimError::FactoryIncomplete { factory, missing }) => {
             assert_eq!(factory, bare_factory);
             assert_eq!(missing.len(), 5);
@@ -1671,7 +1695,7 @@ fn factories_cannot_produce_until_all_five_sub_systems_are_fitted() {
     // identical recipe runs there without a FactoryIncomplete error.
     let ore2 = w.produce_from_mine(s.redrock_mine, s.karth, s.iron_ore, 10, QualityGrade::Standard).unwrap();
     w.admin_move_lot(ore2, LocationRef::Site(s.forge), None).unwrap();
-    assert!(w.start_production(s.factory, recipe, &[ore2]).is_ok());
+    assert!(w.start_production(s.factory, recipe, &[ore2], &[]).is_ok());
 }
 
 #[test]
@@ -1699,13 +1723,14 @@ fn retooling_burns_real_money_and_imposes_downtime() {
     let recipe = w.define_recipe(
         "Roll Armor Plate (post-retool)",
         vec![(s.iron_ore, 10)],
+        vec![],
         RecipeOutputs::Commodity { commodity: s.armor_plate, quantity: 5 },
         1,
         None,
     );
     let ore = w.produce_from_mine(s.redrock_mine, s.karth, s.iron_ore, 10, QualityGrade::Standard).unwrap();
     w.admin_move_lot(ore, LocationRef::Site(s.forge), None).unwrap();
-    assert!(matches!(w.start_production(s.factory, recipe, &[ore]), Err(SimError::InvalidState(_))));
+    assert!(matches!(w.start_production(s.factory, recipe, &[ore], &[]), Err(SimError::InvalidState(_))));
 
     assert!(w.check_invariants().is_empty(), "burned retool money violated conservation");
 }
@@ -1726,4 +1751,376 @@ fn mine_reserves_deplete_for_real() {
         Err(SimError::InsufficientQuantity { missing, .. }) => assert_eq!(missing, 600),
         other => panic!("mined ore that is not in the ground: {other:?}"),
     }
+}
+
+/// Three factions sharing one site should all actually fight in the same
+/// tick — the cascading multi-faction battle, not just the first two owners
+/// while a third sits untouched next to a live enemy.
+#[test]
+fn three_way_standoff_cascades_through_all_factions_in_one_tick() {
+    use adona_sim::events::EventKind;
+
+    let mut w = World::new(7);
+    let karth = w.create_actor("Karth Directorate", ActorKind::Faction, 0);
+    let veyra = w.create_actor("Veyra Compact", ActorKind::Faction, 0);
+    let orsk = w.create_actor("Orsk Combine", ActorKind::Faction, 0);
+    let site = w.create_location("Tri-Point", LocationKind::Battlefield, (0, 0));
+    w.set_territory_controller(site, Some(karth)).unwrap();
+
+    let mech_slots: Vec<_> = (0..5)
+        .map(|i| {
+            let def = w.define_component_def(&format!("Part {i}"), 1, ComponentCategory::MechOrEquipment);
+            ComponentSlot { name: format!("Slot {i}"), accepts: vec![def] }
+        })
+        .collect();
+    let design = w.define_design("Grunt", AssetKind::Mech, mech_slots, None, None).unwrap();
+
+    let make_formation = |w: &mut World, owner: ActorId, n: u32| -> FormationId {
+        let mut assets = Vec::new();
+        for _ in 0..n {
+            assets.push(
+                w.seed_asset(
+                    owner,
+                    design,
+                    site,
+                    QualityGrade::Standard,
+                    AssetOrigin::SeededHistorical { note: "line mech".into() },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        let template =
+            w.define_toe_template("Ad Hoc", "line", vec![ToeSlot { role: "Line".into(), design, count: n }]);
+        w.try_assemble_formation(owner, template, "Ad Hoc Force", site).unwrap()
+    };
+    make_formation(&mut w, karth, 5);
+    make_formation(&mut w, veyra, 5);
+    make_formation(&mut w, orsk, 5);
+
+    let before = w.events().len();
+    w.tick();
+    let battles = w.events()[before..]
+        .iter()
+        .filter(|e| matches!(&e.kind, EventKind::BattleResolved { .. }))
+        .count();
+    assert_eq!(battles, 2, "a three-way standoff must cascade through two pairwise battles in one tick");
+    assert!(w.check_invariants().is_empty());
+}
+
+/// A defender that has held ground for weeks should be measurably harder to
+/// dislodge than a defender who just captured the same ground moments ago —
+/// the entrenchment bonus that backs "hold the frontline."
+#[test]
+fn entrenched_defenders_resist_attacks_that_would_beat_a_fresh_capture() {
+    let make_world = |days_held: u64| {
+        let mut w = World::new(99);
+        let attacker = w.create_actor("Attackers", ActorKind::Faction, 0);
+        let defender = w.create_actor("Defenders", ActorKind::Faction, 0);
+        let site = w.create_location("Ridge Line", LocationKind::Battlefield, (0, 0));
+
+        let mech_slots: Vec<_> = (0..5)
+            .map(|i| {
+                let def = w.define_component_def(&format!("Part {i}"), 1, ComponentCategory::MechOrEquipment);
+                ComponentSlot { name: format!("Slot {i}"), accepts: vec![def] }
+            })
+            .collect();
+        let design = w.define_design("Grunt", AssetKind::Mech, mech_slots, None, None).unwrap();
+
+        for _ in 0..days_held {
+            w.tick();
+        }
+        w.set_territory_controller(site, Some(defender)).unwrap();
+        // set_territory_controller stamps controlled_since at the day it is
+        // called, so roll the clock forward again to actually simulate time
+        // held under that controller.
+        for _ in 0..days_held {
+            w.tick();
+        }
+
+        let mut attacker_assets = Vec::new();
+        for _ in 0..6 {
+            attacker_assets.push(
+                w.seed_asset(
+                    attacker,
+                    design,
+                    site,
+                    QualityGrade::Standard,
+                    AssetOrigin::SeededHistorical { note: "attacker".into() },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        let mut defender_assets = Vec::new();
+        for _ in 0..5 {
+            defender_assets.push(
+                w.seed_asset(
+                    defender,
+                    design,
+                    site,
+                    QualityGrade::Standard,
+                    AssetOrigin::SeededHistorical { note: "defender".into() },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        (w, site, attacker, attacker_assets, defender, defender_assets)
+    };
+
+    let (mut fresh_world, site, attacker, attacker_assets, defender, defender_assets) = make_world(0);
+    let fresh_outcome = fresh_world
+        .resolve_battle(site, attacker, &attacker_assets, defender, &defender_assets)
+        .unwrap();
+
+    let (mut dug_in_world, site, attacker, attacker_assets, defender, defender_assets) = make_world(30);
+    let dug_in_outcome = dug_in_world
+        .resolve_battle(site, attacker, &attacker_assets, defender, &defender_assets)
+        .unwrap();
+
+    assert!(
+        dug_in_outcome.defender_effective_power > fresh_outcome.defender_effective_power,
+        "a defender entrenched for 30 days must fight with more effective power than one that just took the ground"
+    );
+    assert!(
+        dug_in_outcome.attacker_win_pct < fresh_outcome.attacker_win_pct,
+        "entrenchment must lower the attacker's real odds of winning"
+    );
+    assert!(fresh_world.check_invariants().is_empty());
+    assert!(dug_in_world.check_invariants().is_empty());
+}
+
+/// Mines should turn up on their own as the world runs, wired into the real
+/// route network so factions can actually reach and fight over them — not
+/// only exist if hand-authored in scenario setup.
+#[test]
+fn mines_are_discovered_procedurally_and_are_reachable() {
+    use adona_sim::events::EventKind;
+    use adona_sim::locations::LocationKind;
+
+    let mut w = World::new(1);
+    w.create_location("Anchor City", LocationKind::City, (0, 0));
+
+    let mut discovered: Option<LocationId> = None;
+    for _ in 0..500 {
+        w.tick();
+        if discovered.is_none() {
+            discovered = w.events().iter().find_map(|e| match &e.kind {
+                EventKind::MineDiscovered { mine } => Some(*mine),
+                _ => None,
+            });
+        }
+    }
+    let mine = discovered.expect("no mine was procedurally discovered within 500 days");
+    let loc = w.location(mine).expect("discovered mine must be a real location");
+    assert_eq!(loc.kind, LocationKind::Mine);
+    assert!(loc.mine_reserves.is_some());
+
+    let reachable = w.routes_iter().any(|r| r.from == mine) && w.routes_iter().any(|r| r.to == mine);
+    assert!(reachable, "a discovered mine must have routes connecting it to the existing map both ways");
+    assert!(w.check_invariants().is_empty());
+}
+
+/// The tiered material chain generator must be genuinely generic: an
+/// invented material with an invented, non-13 tier count must work exactly
+/// like any ADONA content would, proving it isn't secretly coupled to
+/// ADONA's specific 5-materials/13-tiers content.
+#[test]
+fn generate_tiered_material_chain_is_generic_not_adona_specific() {
+    use adona_sim::content::TieredChainSpec;
+
+    let mut w = World::new(1);
+    let spec = TieredChainSpec {
+        material_name: "Zorblax".into(),
+        tier_names: vec!["Crude".into(), "Refined".into(), "Pure".into()],
+        unit: UnitOfMeasure::Kilograms,
+        base_price: 5,
+        component_category: ComponentCategory::MechOrEquipment,
+        refine_input_qty: 10,
+        refine_output_qty: 8,
+        refine_duration_days: 1,
+        convert_input_qty: 4,
+        convert_duration_days: 1,
+    };
+    let handles = w.generate_tiered_material_chain(&spec);
+
+    assert_eq!(handles.commodities.len(), 3);
+    assert_eq!(handles.component_defs.len(), 3);
+    assert_eq!(handles.convert_recipes.len(), 3);
+    assert_eq!(handles.refine_recipes.len(), 2, "N tiers must produce N-1 refining steps");
+
+    for (i, &commodity) in handles.commodities.iter().enumerate() {
+        let def = w.commodity(commodity).unwrap();
+        assert_eq!(def.tier, (i + 1) as u8);
+        assert!(def.name.contains("Zorblax"), "generated commodity name must use the caller's material name");
+    }
+    for (i, &def_id) in handles.component_defs.iter().enumerate() {
+        let def = w.component_def(def_id).unwrap();
+        assert_eq!(def.tier, (i + 1) as u8);
+    }
+    let requirement = handles.any_tier_requirement(2);
+    assert_eq!(requirement.count, 2);
+    assert_eq!(requirement.accepts, handles.component_defs);
+    assert!(w.check_invariants().is_empty());
+}
+
+/// A recipe with real component inputs must consume real loose components
+/// (never a fake input) and fail cleanly, consuming nothing, when short.
+#[test]
+fn recipe_component_inputs_consume_real_components_and_fail_cleanly_when_short() {
+    let mut s = build_scenario(42);
+    let w = &mut s.world;
+
+    let input_def = w.define_component_def("Test Input Part", 1, ComponentCategory::MechOrEquipment);
+    let output_def = w.define_component_def("Test Output Part", 2, ComponentCategory::MechOrEquipment);
+    let recipe = w.define_recipe(
+        "Assemble Test Output Part",
+        vec![],
+        vec![ComponentRequirement { accepts: vec![input_def], count: 2 }],
+        RecipeOutputs::Components { def: output_def, count: 1 },
+        1,
+        None,
+    );
+
+    let c1 = w
+        .seed_component(s.karth, input_def, s.forge, QualityGrade::Standard, AssetOrigin::SeededHistorical { note: "part".into() })
+        .unwrap();
+    match w.start_production(s.factory, recipe, &[], &[c1]) {
+        Err(SimError::InsufficientComponents { missing, .. }) => assert_eq!(missing, 1),
+        other => panic!("started production without enough real components: {other:?}"),
+    }
+    assert_eq!(w.component(c1).unwrap().placement, ComponentPlacement::Loose(LocationRef::Site(s.forge)));
+
+    let c2 = w
+        .seed_component(s.karth, input_def, s.forge, QualityGrade::Standard, AssetOrigin::SeededHistorical { note: "part".into() })
+        .unwrap();
+    let job = w.start_production(s.factory, recipe, &[], &[c1, c2]).unwrap();
+    assert_eq!(w.component(c1).unwrap().placement, ComponentPlacement::Consumed(job));
+    assert_eq!(w.component(c2).unwrap().placement, ComponentPlacement::Consumed(job));
+    assert!(w.check_invariants().is_empty());
+}
+
+/// Locations with a configured yield produce real commodity for their
+/// controller automatically every day, with no manual `produce_from_mine`
+/// call, and still respect `Finite` depletion of that specific yield line.
+#[test]
+fn tick_location_yields_produce_automatically_for_the_controller() {
+    let mut w = World::new(5);
+    let karth = w.create_actor("Karth", ActorKind::Faction, 0);
+    let mine = w.create_location("Test Mine", LocationKind::Mine, (0, 0));
+    let ore = w.define_commodity("Test Ore", UnitOfMeasure::Kilograms, 1, 1);
+    w.set_territory_controller(mine, Some(karth)).unwrap();
+    w.add_location_yield(mine, ore, 20, adona_sim::locations::MineReserves::Finite { remaining: 25 }).unwrap();
+
+    w.tick();
+    let total: u64 = w.lots_iter().filter(|l| l.commodity == ore && l.owner == karth).map(|l| l.quantity).sum();
+    assert_eq!(total, 20, "location must auto-yield without any manual produce_from_mine call");
+
+    w.tick();
+    let total_after_depletion: u64 = w.lots_iter().filter(|l| l.commodity == ore && l.owner == karth).map(|l| l.quantity).sum();
+    assert_eq!(total_after_depletion, 20, "a depleted yield must not produce more than its remaining reserve");
+    assert!(w.check_invariants().is_empty());
+}
+
+/// The generic auto-production tick starts whatever runnable recipe an idle
+/// operational factory can, preferring the highest-tier runnable untooled
+/// recipe when nothing tooled is ready.
+#[test]
+fn tick_factory_auto_production_prefers_highest_tier_runnable_recipe() {
+    let mut s = build_scenario(42);
+    let w = &mut s.world;
+
+    let low_in = w.define_commodity("Low Grade Ore", UnitOfMeasure::Kilograms, 1, 1);
+    let low_out = w.define_commodity("Low Grade Plate", UnitOfMeasure::Kilograms, 2, 1);
+    let high_in = w.define_commodity("High Grade Ore", UnitOfMeasure::Kilograms, 8, 1);
+    let high_out = w.define_commodity("High Grade Plate", UnitOfMeasure::Kilograms, 9, 1);
+    let recipe_low =
+        w.define_recipe("Low Refine", vec![(low_in, 10)], vec![], RecipeOutputs::Commodity { commodity: low_out, quantity: 5 }, 1, None);
+    let recipe_high = w.define_recipe(
+        "High Refine",
+        vec![(high_in, 10)],
+        vec![],
+        RecipeOutputs::Commodity { commodity: high_out, quantity: 5 },
+        1,
+        None,
+    );
+
+    w.seed_lot(s.karth, low_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "ore".into() })
+        .unwrap();
+    w.seed_lot(s.karth, high_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "ore".into() })
+        .unwrap();
+
+    let before = w.events().len();
+    w.tick();
+    let started: Vec<RecipeId> = w.events()[before..]
+        .iter()
+        .filter_map(|e| match &e.kind {
+            adona_sim::events::EventKind::ProductionStarted { recipe, .. } => Some(*recipe),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![recipe_high], "an idle factory must prefer the highest-tier runnable recipe");
+    assert_ne!(started.first(), Some(&recipe_low));
+    assert!(w.check_invariants().is_empty());
+}
+
+/// A factory tooled for a specific recipe prefers running it over any
+/// higher-tier untooled recipe that also happens to be runnable — the bound
+/// job is the deliberate one.
+#[test]
+fn tick_factory_auto_production_prefers_tooled_recipe_over_higher_tier_untooled() {
+    let mut s = build_scenario(42);
+    let w = &mut s.world;
+
+    let tooling_design = w.define_design("Bespoke Line", AssetKind::FactoryTooling, vec![], None, None).unwrap();
+    let tooling = w
+        .seed_asset(
+            s.karth,
+            tooling_design,
+            s.forge,
+            QualityGrade::Standard,
+            AssetOrigin::SeededHistorical { note: "line".into() },
+            None,
+        )
+        .unwrap();
+    w.install_tooling(s.factory, tooling, 0, 0).unwrap();
+
+    let bespoke_in = w.define_commodity("Bespoke Input", UnitOfMeasure::Kilograms, 1, 1);
+    let bespoke_out = w.define_commodity("Bespoke Output", UnitOfMeasure::Kilograms, 3, 1);
+    let recipe_tooled = w.define_recipe(
+        "Bespoke Run",
+        vec![(bespoke_in, 10)],
+        vec![],
+        RecipeOutputs::Commodity { commodity: bespoke_out, quantity: 5 },
+        1,
+        Some(tooling_design),
+    );
+    let untooled_in = w.define_commodity("Untooled Input", UnitOfMeasure::Kilograms, 12, 1);
+    let untooled_out = w.define_commodity("Untooled Output", UnitOfMeasure::Kilograms, 13, 1);
+    let _recipe_untooled_high_tier = w.define_recipe(
+        "Untooled High-Tier Run",
+        vec![(untooled_in, 10)],
+        vec![],
+        RecipeOutputs::Commodity { commodity: untooled_out, quantity: 5 },
+        1,
+        None,
+    );
+
+    w.seed_lot(s.karth, bespoke_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "in".into() })
+        .unwrap();
+    w.seed_lot(s.karth, untooled_in, 10, QualityGrade::Standard, LegalStatus::Legitimate, s.forge, LotOrigin::SeededHistorical { note: "in".into() })
+        .unwrap();
+
+    let before = w.events().len();
+    w.tick();
+    let started: Vec<RecipeId> = w.events()[before..]
+        .iter()
+        .filter_map(|e| match &e.kind {
+            adona_sim::events::EventKind::ProductionStarted { recipe, .. } => Some(*recipe),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![recipe_tooled], "a tooled-and-ready recipe must win even over a higher-tier untooled one");
+    assert!(w.check_invariants().is_empty());
 }

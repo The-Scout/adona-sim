@@ -1,0 +1,177 @@
+{
+  "seed": 3600,
+  "tier_names": [
+    "Primitive",
+    "Scavenger",
+    "Pirate",
+    "Standard",
+    "Old Earth Exploration Grade 1",
+    "Old Earth Exploration Grade 2",
+    "Old Earth Exploration Grade 3",
+    "Old Earth Exploration Grade 4",
+    "Old Earth Exploration Grade 5",
+    "Old Earth Military Grade",
+    "Old Earth Scientific Grade",
+    "Old Earth Military Elite Grade",
+    "Old Earth Scientific Elite Grade"
+  ],
+  "materials": [
+    { "key": "ferrite", "material_name": "Ferrite", "component_role": "Leg Actuator" },
+    { "key": "diamond", "material_name": "Diamond", "component_role": "Weapon Mount" },
+    { "key": "rare_earth", "material_name": "Rare Earth", "component_role": "Ammo Feed" },
+    { "key": "ruthenium", "material_name": "Ruthenium", "component_role": "Power Core" },
+    { "key": "helium3", "material_name": "Helium-3", "component_role": "Cooling System" }
+  ],
+  "designs": [
+    {
+      "key": "hanseatic_escort",
+      "name": "Hanseatic Escort Vehicle",
+      "kind": "Vehicle",
+      "cargo_capacity_kg": 5000,
+      "slots": []
+    }
+  ],
+  "economy": {
+    "mine_starting_reserve": 50000,
+    "mine_yield_per_day": 20,
+    "refineries_per_faction": 2,
+    "refine_input_qty": 20,
+    "refine_output_qty": 16,
+    "refine_duration_days": 2,
+    "convert_input_qty": 20,
+    "convert_duration_days": 1,
+    "assembly_duration_days": 3
+  },
+  "locations": [
+    {
+      "key": "cradle",
+      "name": "The Cradle of Conflict",
+      "kind": "Mine",
+      "position": [0, 0],
+      "controller_key": "drone_remnant",
+      "mine_reserves": "Infinite",
+      "yields_material_key": "ruthenium",
+      "yield_quantity_per_day": 200
+    },
+    { "key": "axiom_home", "name": "Axiom Freehold", "kind": "City", "position": [20, 0], "controller_key": "axiom" },
+    { "key": "athenian_home", "name": "Athenian Polis", "kind": "City", "position": [10, 17], "controller_key": "athenian" },
+    { "key": "hanseatic_home", "name": "Hanseport", "kind": "City", "position": [-10, 17], "controller_key": "hanseatic" },
+    { "key": "pirate_home", "name": "The Baroness's Hold", "kind": "City", "position": [-20, 0], "controller_key": "pirates" },
+    { "key": "techno_home", "name": "Shrouded Relay Station", "kind": "MilitaryBase", "position": [-10, -17], "controller_key": "techno_primitives" },
+    { "key": "scavenger_home", "name": "Scrapfield Camp", "kind": "Ruin", "position": [10, -17], "controller_key": "scavengers" }
+  ],
+  "routes": [
+    { "from_key": "axiom_home", "to_key": "cradle", "distance_days": 3 },
+    { "from_key": "cradle", "to_key": "axiom_home", "distance_days": 3 },
+    { "from_key": "athenian_home", "to_key": "cradle", "distance_days": 3 },
+    { "from_key": "cradle", "to_key": "athenian_home", "distance_days": 3 },
+    { "from_key": "hanseatic_home", "to_key": "cradle", "distance_days": 3 },
+    { "from_key": "cradle", "to_key": "hanseatic_home", "distance_days": 3 },
+    { "from_key": "pirate_home", "to_key": "cradle", "distance_days": 3 },
+    { "from_key": "cradle", "to_key": "pirate_home", "distance_days": 3 },
+    { "from_key": "techno_home", "to_key": "cradle", "distance_days": 3 },
+    { "from_key": "cradle", "to_key": "techno_home", "distance_days": 3 },
+    { "from_key": "scavenger_home", "to_key": "cradle", "distance_days": 3 },
+    { "from_key": "cradle", "to_key": "scavenger_home", "distance_days": 3 },
+    { "from_key": "hanseatic_home", "to_key": "athenian_home", "distance_days": 1 },
+    { "from_key": "athenian_home", "to_key": "hanseatic_home", "distance_days": 1 }
+  ],
+  "factions": [
+    {
+      "key": "drone_remnant",
+      "name": "The Drone Remnant",
+      "kind": "Faction",
+      "starting_treasury": 0,
+      "doctrine": "swarm-and-officer",
+      "home_location_key": "cradle",
+      "population": 5000,
+      "tax_rate_per_capita": 0,
+      "toe": [
+        { "role": "Line Drone", "design_key": "universal_mech", "count": 6 },
+        { "role": "Officer Walker", "design_key": "universal_mech", "count": 2 }
+      ]
+    },
+    {
+      "key": "axiom",
+      "name": "Axiom Consortium",
+      "kind": "Faction",
+      "starting_treasury": 2000000,
+      "doctrine": "bulk-vs-elite",
+      "home_location_key": "axiom_home",
+      "population": 40000,
+      "tax_rate_per_capita": 2,
+      "toe": [
+        { "role": "Indentured Line", "design_key": "universal_mech", "count": 6 },
+        { "role": "Executive Elite", "design_key": "universal_mech", "count": 2 }
+      ]
+    },
+    {
+      "key": "athenian",
+      "name": "Athenian Republic",
+      "kind": "Faction",
+      "starting_treasury": 800000,
+      "doctrine": "elite-line-defense",
+      "home_location_key": "athenian_home",
+      "population": 25000,
+      "tax_rate_per_capita": 2,
+      "toe": [
+        { "role": "Line Guard", "design_key": "universal_mech", "count": 6 },
+        { "role": "Elite Cohort", "design_key": "universal_mech", "count": 2 }
+      ]
+    },
+    {
+      "key": "hanseatic",
+      "name": "Hanseatic League",
+      "kind": "Faction",
+      "starting_treasury": 1500000,
+      "doctrine": "standardized-professional",
+      "home_location_key": "hanseatic_home",
+      "population": 60000,
+      "tax_rate_per_capita": 2,
+      "toe": [
+        { "role": "Standard Mech", "design_key": "universal_mech", "count": 6 },
+        { "role": "Escort Vehicle", "design_key": "hanseatic_escort", "count": 2 }
+      ]
+    },
+    {
+      "key": "pirates",
+      "name": "Pirate Baronies",
+      "kind": "PiratePolity",
+      "starting_treasury": 400000,
+      "doctrine": "patchwork-raiding",
+      "home_location_key": "pirate_home",
+      "population": 15000,
+      "tax_rate_per_capita": 1,
+      "toe": [
+        { "role": "Patchwork Raider", "design_key": "universal_mech", "count": 6 },
+        { "role": "Liberated Heavy", "design_key": "universal_mech", "count": 2 }
+      ]
+    },
+    {
+      "key": "techno_primitives",
+      "name": "Techno-Primitives",
+      "kind": "Faction",
+      "starting_treasury": 600000,
+      "doctrine": "covert-elite-ops",
+      "home_location_key": "techno_home",
+      "population": 8000,
+      "tax_rate_per_capita": 2,
+      "toe": [
+        { "role": "Operative", "design_key": "universal_mech", "count": 4 }
+      ]
+    },
+    {
+      "key": "scavengers",
+      "name": "Independent Scavengers",
+      "kind": "IndependentTrader",
+      "starting_treasury": 50000,
+      "doctrine": "scavenger-band",
+      "home_location_key": "scavenger_home",
+      "population": 3000,
+      "tax_rate_per_capita": 1,
+      "toe": [
+        { "role": "Wreck-Mech", "design_key": "universal_mech", "count": 3 }
+      ]
+    }
+  ]
+}

@@ -22,6 +22,7 @@ use crate::locations::LocationRef;
 use crate::world::World;
 use crate::SimError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// One line of a TO&E template: this many assets of this exact design.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,31 +130,33 @@ impl World {
             .ok_or(SimError::UnknownToeTemplate(template_id))?
             .clone();
 
+        // Every free (not already in a formation or aboard a convoy),
+        // colocated asset the owner holds, grouped by design — gathered
+        // once for the whole template rather than rescanning every asset
+        // in the world once per slot.
+        let mut free_by_design: BTreeMap<DesignId, Vec<AssetId>> = BTreeMap::new();
+        for (aid, asset) in &self.assets {
+            if asset.owner != owner {
+                continue;
+            }
+            if matches!(asset.location, LocationRef::Formation(_) | LocationRef::Convoy(_)) {
+                continue;
+            }
+            if self.resolve_site(asset.location) != Some(site) {
+                continue;
+            }
+            free_by_design.entry(asset.design).or_default().push(*aid);
+        }
+
         let mut chosen: Vec<AssetId> = Vec::new();
         let mut shortages: Vec<ToeShortage> = Vec::new();
         for slot in &template.slots {
-            let mut found: u32 = 0;
-            for (aid, asset) in &self.assets {
-                if found == slot.count {
-                    break;
-                }
-                if asset.owner != owner || asset.design != slot.design {
-                    continue;
-                }
-                if chosen.contains(aid) {
-                    continue;
-                }
-                // Only free assets: not already in a formation, not aboard a
-                // convoy.
-                if matches!(asset.location, LocationRef::Formation(_) | LocationRef::Convoy(_)) {
-                    continue;
-                }
-                if self.resolve_site(asset.location) != Some(site) {
-                    continue;
-                }
-                chosen.push(*aid);
-                found += 1;
-            }
+            let taken: Vec<AssetId> = match free_by_design.get_mut(&slot.design) {
+                Some(available) => available.drain(..(slot.count as usize).min(available.len())).collect(),
+                None => Vec::new(),
+            };
+            let found = taken.len() as u32;
+            chosen.extend(taken);
             if found < slot.count {
                 shortages.push(ToeShortage {
                     role: slot.role.clone(),
@@ -196,8 +199,13 @@ impl World {
     /// invariant broken otherwise: a captured unit now belongs to the
     /// winner, not the formation's original owner.
     pub(crate) fn remove_asset_from_formations(&mut self, asset: AssetId) {
-        for formation in self.formations.values_mut() {
-            formation.assets.retain(|a| *a != asset);
+        // The asset's own `location` already names its formation (if any) —
+        // an O(1) lookup, rather than scanning every formation in the world
+        // to find the one that happens to hold it.
+        if let Some(LocationRef::Formation(fid)) = self.assets.get(&asset).map(|a| a.location) {
+            if let Some(formation) = self.formations.get_mut(&fid) {
+                formation.assets.retain(|a| *a != asset);
+            }
         }
     }
 
@@ -263,29 +271,33 @@ impl World {
             .toe_templates
             .get(&template_id)
             .ok_or(SimError::UnknownToeTemplate(template_id))?;
-        let mut counted: Vec<AssetId> = Vec::new();
+
+        // Same one-pass-then-drain approach as `try_assemble_formation`:
+        // gather free, colocated assets by design once, instead of
+        // rescanning every asset in the world once per slot.
+        let mut free_by_design: BTreeMap<DesignId, Vec<AssetId>> = BTreeMap::new();
+        for (aid, asset) in &self.assets {
+            if asset.owner != owner {
+                continue;
+            }
+            if matches!(asset.location, LocationRef::Formation(_) | LocationRef::Convoy(_)) {
+                continue;
+            }
+            if self.resolve_site(asset.location) != Some(site) {
+                continue;
+            }
+            free_by_design.entry(asset.design).or_default().push(*aid);
+        }
+
         let mut shortages = Vec::new();
         for slot in &template.slots {
-            let mut found: u32 = 0;
-            for (aid, asset) in &self.assets {
-                if found == slot.count {
-                    break;
+            let found = match free_by_design.get_mut(&slot.design) {
+                Some(available) => {
+                    let take_n = (slot.count as usize).min(available.len());
+                    available.drain(..take_n).count() as u32
                 }
-                if asset.owner != owner || asset.design != slot.design {
-                    continue;
-                }
-                if counted.contains(aid) {
-                    continue;
-                }
-                if matches!(asset.location, LocationRef::Formation(_) | LocationRef::Convoy(_)) {
-                    continue;
-                }
-                if self.resolve_site(asset.location) != Some(site) {
-                    continue;
-                }
-                counted.push(*aid);
-                found += 1;
-            }
+                None => 0,
+            };
             if found < slot.count {
                 shortages.push(ToeShortage {
                     role: slot.role.clone(),

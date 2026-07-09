@@ -134,6 +134,12 @@ impl World {
 
     /// Internal lot creation — every path that makes goods real goes through
     /// here so the event log always has a `LotCreated`.
+    /// Each parameter is a distinct, load-bearing fact about a real physical
+    /// lot (docket: no originless commodity pools) — bundling them into a
+    /// params struct would move the field count around, not reduce it, and
+    /// this is the single funnel every lot-creating call site already goes
+    /// through, so there's nowhere left to push the complexity to.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_lot_raw(
         &mut self,
         owner: ActorId,
@@ -184,7 +190,10 @@ impl World {
 
     /// Seed a lot into the world. Only seed-class origins are accepted here;
     /// mined and produced goods must come from `produce_from_mine` and
-    /// production jobs — no back door into fake stock.
+    /// production jobs — no back door into fake stock. Same rationale as
+    /// `create_lot_raw` for the argument count: every parameter is a real,
+    /// distinct fact about the seeded lot, not incidental configuration.
+    #[allow(clippy::too_many_arguments)]
     pub fn seed_lot(
         &mut self,
         owner: ActorId,
@@ -265,7 +274,7 @@ impl World {
         {
             self.locations.get_mut(&mine).unwrap().mine_reserves =
                 Some(MineReserves::Finite {
-                    remaining: remaining - quantity,
+                    remaining: remaining.saturating_sub(quantity),
                 });
         }
         self.push_event(EventKind::MineYield {
